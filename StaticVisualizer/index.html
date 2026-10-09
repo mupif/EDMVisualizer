@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Entity Context</title>
+    <style>
+        body { margin: 0; font-family: sans-serif; background-color: #fff; color: #333; }
+        #graph-container { padding: 10px; overflow: auto; text-align: center; }
+        #graph-container.linked svg { cursor: pointer; }
+        svg { max-width: 100%; height: auto; }
+        .status { color: #666; font-size: 0.9rem; }
+        .error { color: #b00020; font-size: 0.9rem; }
+
+        #login-panel { position: fixed; z-index: 20; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(340px, calc(100% - 48px)); padding: 20px; background: #fff; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 0 0 100vmax rgba(0,0,0,0.25), 0 8px 24px rgba(0,0,0,0.18); }
+        #login-panel h2 { margin-top: 0; font-size: 1.2rem; color: #1565c0; }
+        #login-form { display: grid; gap: 12px; }
+        #login-form label { display: grid; gap: 5px; font-size: 0.9rem; }
+        #login-form input { box-sizing: border-box; width: 100%; padding: 9px; border: 1px solid #bbb; border-radius: 4px; font: inherit; }
+        #login-form button { padding: 9px 12px; border: 0; border-radius: 4px; background: #1565c0; color: #fff; font: inherit; font-weight: bold; cursor: pointer; }
+        #login-form button:disabled { opacity: 0.6; cursor: wait; }
+        #login-error { margin: 0; color: #b00020; font-size: 0.9rem; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@viz-js/viz@3.2.0/lib/viz-standalone.js"></script>
+</head>
+<body>
+
+    <div id="graph-container"><span class="status">Sign in to load the entity context.</span></div>
+
+    <section id="login-panel" aria-labelledby="login-title">
+        <h2 id="login-title">Sign in to MuPIF DB</h2>
+        <form id="login-form">
+            <label>Username<input name="username" autocomplete="username" required></label>
+            <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+            <button type="submit">Sign in</button>
+            <p id="login-error" role="alert"></p>
+        </form>
+    </section>
+
+    <script>
+        // --- CONFIGURATION ---
+        // Everything is given by the page using this one, as URL parameters:
+        //   db, type, id - the entity to show (defaults below)
+        //   depth        - traversal depth, i.e. max_level of the EDM query (-1 = full depth)
+        //   link         - optional URL opened when the graph is clicked; {db}, {type}, {id} and {depth} are replaced
+        //   target       - window to open the link in (default _blank = new tab or window; e.g. _self, _top, or a window name)
+        // (the API URL is deliberately not a parameter: a link could otherwise send the user's password to another server)
+        const API_ROOT_URL = "https://test.mupif.org/api/";
+        const DEFAULT_ENTITY = { db: "dms_sysbet01", type: "Calibration", id: "6ab514418294832e099ab9d8", depth: "2" };
+        const urlParams = new URLSearchParams(location.search);
+        const entity = Object.fromEntries(Object.entries(DEFAULT_ENTITY).map(([name, value]) => [name, urlParams.get(name) || value]));
+        const graphLink = urlParams.get('link');
+        const graphLinkTarget = urlParams.get('target') || '_blank';
+        const edmUrl = (dbName) => `${API_ROOT_URL}EDM/${encodeURIComponent(dbName)}`;
+
+        const shortId = (id) => id ? id.substring(0, 6) + "…" : "unknown";
+        const escapeHtml = (value) => String(value ?? '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+        // Quoted DOT string; lines are joined with DOT's \n line break
+        const dotQuote = (...lines) => '"' + lines.map(line => String(line ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')).join('\\n') + '"';
+
+        // --- AUTHENTICATION (same flow as getAuthToken() in mupifDB/api/client_mupif.py) ---
+        // Credentials are kept in memory only, so an expired token can be renewed by logging in again.
+        let apiCredentials = null;
+        let bearerToken = null;
+        let bearerTokenExpiresAt = 0; // ms since epoch
+        let authTokenPromise = null;
+
+        function parseTokenExpiration(token) {
+            // /login returns expires_at (ISO, microsecond precision); /refresh_token does not,
+            // so fall back to the JWT "exp" claim.
+            if (token.expires_at) {
+                const expiration = Date.parse(token.expires_at.replace(/(\.\d{3})\d+/, '$1'));
+                if (Number.isFinite(expiration)) return expiration;
+            }
+            try {
+                const payload = token.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+                const exp = JSON.parse(atob(payload)).exp;
+                if (Number.isFinite(exp)) return exp * 1000;
+            } catch (e) { /* not a decodable JWT */ }
+            return 0;
+        }
+
+        async function postAuthRequest(endpoint, options) {
+            const response = await fetch(`${API_ROOT_URL}${endpoint}`, { method: 'POST', ...options });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+            if (!body.access_token) throw new Error(`${endpoint} response did not include an access token.`);
+            bearerToken = body;
+            bearerTokenExpiresAt = parseTokenExpiration(body);
+        }
+
+        function login() {
+            return postAuthRequest('login', {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Accept': 'application/json'
+                },
+                body: new URLSearchParams({ grant_type: 'password', username: apiCredentials.username, password: apiCredentials.password })
+            });
+        }
+
+        function refreshToken() {
+            return postAuthRequest('refresh_token', {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'Authorization': `Bearer ${bearerToken.access_token}`
+                }
+            });
+        }
+
+        // Log in when there is no token or it (almost) expired, refresh it within 15 minutes of expiry.
+        // Concurrent callers share one pending request.
+        function getAuthToken({ forceLogin = false } = {}) {
+            if (!apiCredentials) return Promise.reject(new Error('Authentication required.'));
+            if (!authTokenPromise) {
+                authTokenPromise = (async () => {
+                    const now = Date.now();
+                    if (forceLogin || !bearerToken || now > bearerTokenExpiresAt - 10 * 1000) {
+                        await login();
+                    } else if (now > bearerTokenExpiresAt - 15 * 60 * 1000) {
+                        try {
+                            await refreshToken();
+                        } catch (error) {
+                            console.warn('Error refreshing auth token, logging in again:', error);
+                            await login();
+                        }
+                    }
+                    return bearerToken;
+                })().finally(() => { authTokenPromise = null; });
+            }
+            return authTokenPromise;
+        }
+
+        function showLoginPanel(message) {
+            bearerToken = null;
+            bearerTokenExpiresAt = 0;
+            apiCredentials = null;
+            document.getElementById('login-error').textContent = message;
+            document.getElementById('login-panel').style.display = 'block';
+        }
+
+        async function getRequestHeaders() {
+            try {
+                const token = await getAuthToken();
+                return { 'Authorization': `Bearer ${token.access_token}` };
+            } catch (error) {
+                showLoginPanel(`Session expired: ${error.message}`);
+                throw error;
+            }
+        }
+
+        async function fetchApi(url) {
+            let response = await fetch(url, { headers: await getRequestHeaders() });
+            if (response.status === 401 && apiCredentials) {
+                // Token rejected (e.g. server-side session ended): drop it so getAuthToken() logs in again, then retry once.
+                bearerToken = null;
+                response = await fetch(url, { headers: await getRequestHeaders() });
+            }
+            return response;
+        }
+
+        async function fetchJson(url, what) {
+            const response = await fetchApi(url);
+            const body = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(`${what} fetch failed: ${body?.detail || `HTTP ${response.status}`}`);
+            return body;
+        }
+
+        document.getElementById('login-form').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const submitButton = form.querySelector('button[type="submit"]');
+            const errorElement = document.getElementById('login-error');
+            submitButton.disabled = true;
+            errorElement.textContent = '';
+            try {
+                apiCredentials = { username: form.elements.username.value, password: form.elements.password.value };
+                await getAuthToken({ forceLogin: true });
+                form.elements.password.value = '';
+                document.getElementById('login-panel').style.display = 'none';
+                await render();
+            } catch (error) {
+                apiCredentials = null;
+                errorElement.textContent = `Login failed: ${error.message}`;
+            } finally {
+                submitButton.disabled = false;
+            }
+        });
+
+        // --- EXECUTIONS ---
+        // Visits every entity contained in the fetched data: the root and its composition children (schema links)
+        function walkEntities(schema, nodeData, visit, seen = new Set()) {
+            if (!nodeData || !nodeData.meta || seen.has(nodeData.meta.id)) return;
+            seen.add(nodeData.meta.id);
+            visit(nodeData);
+            const typeSchema = schema[nodeData.meta.type] || {};
+            for (const key in nodeData) {
+                if (key !== 'meta' && typeSchema[key] && typeSchema[key].link !== null) walkEntities(schema, nodeData[key], visit, seen);
+            }
+        }
+
+        // Execution records by id; an execution that cannot be fetched is drawn without its workflow name
+        async function fetchExecutions(execIds) {
+            const entries = await Promise.all([...execIds].map(async execId => {
+                try {
+                    return [execId, (await fetchJson(`${API_ROOT_URL}executions/${encodeURIComponent(execId)}`, 'Execution')).entity];
+                } catch (error) {
+                    console.warn(`Execution ${execId}:`, error);
+                    return [execId, null];
+                }
+            }));
+            return Object.fromEntries(entries);
+        }
+
+        // Inputs and outputs of an execution from its EDMMapping (same rules as the interactive browser):
+        // a mapping is an output when OutputsData writes to it (EDMPath "Name.attr") or createNew holds ids, otherwise an input.
+        function executionEndpoints(execution) {
+            const pathNames = (items) => new Set((items || []).filter(item => item.EDMPath).map(item => item.EDMPath.split('.')[0]));
+            const inputNames = pathNames(execution.InputsData);
+            const outputNames = pathNames(execution.OutputsData);
+            const refIds = (ref) => ref ? [ref.id, ...(ref.ids || [])].filter(Boolean) : [];
+            const inputs = [], outputs = [];
+            for (const mapping of execution.EDMMapping || []) {
+                const ownIds = refIds(mapping);
+                const newIds = refIds(mapping.createNew);
+                const isOutput = outputNames.has(mapping.Name) || newIds.length > 0;
+                const isInput = inputNames.has(mapping.Name) || !isOutput;
+                if (isInput) ownIds.forEach(id => inputs.push({ id, mapping }));
+                if (isOutput) (newIds.length ? newIds : ownIds).forEach(id => outputs.push({ id, mapping }));
+            }
+            return { inputs, outputs };
+        }
+
+        // --- DOT GENERATOR ---
+        // Context only: each entity shows its type and label; edges show composition, parent, upstream and executions.
+        function generateContextDot(schema, data, executions) {
+            const nodeDefs = {};
+            const edgeDefs = [];
+            const containment = new Set(); // "container->child", so the child's parent link is not drawn twice
+            const executionLinks = [];     // { execId, upstreamId, id }
+
+            const entityLabel = (nodeData) => {
+                const label = nodeData.label;
+                const text = label && typeof label === 'object' ? label.value : label;
+                return typeof text === 'string' || typeof text === 'number' ? String(text).trim() : '';
+            };
+            // Type in bold, then the label (if any) and the shortened id; the full id is in the tooltip
+            const htmlNodeLabel = (title, id, subtitle) => `<<b>${escapeHtml(title)}</b>` +
+                (subtitle ? `<br/><font point-size="10">${escapeHtml(subtitle)}</font>` : '') +
+                `<br/><font point-size="8" face="Courier,monospace">${escapeHtml(shortId(id))}</font>>`;
+            // Referenced entity outside the traversal depth
+            const stubNode = (id, type) => `  ${dotQuote(id)} [label=${htmlNodeLabel(type || 'Entity', id)}, tooltip=${dotQuote(`${type || 'Entity'} ${id} (not loaded)`)}, style="rounded,dashed", color="#9e9e9e", fontcolor="#757575"];`;
+
+            function processNode(nodeData) {
+                const id = nodeData.meta.id;
+                const type = nodeData.meta.type || "Unknown";
+                const typeSchema = schema[type] || {};
+                const isRoot = nodeData === data;
+
+                nodeDefs[id] = `  ${dotQuote(id)} [label=${htmlNodeLabel(type, id, entityLabel(nodeData))}, tooltip=${dotQuote(`${type} ${id}`)}` +
+                    (isRoot ? ', fillcolor="#1565c0", fontcolor="white", color="#0d47a1", penwidth=2];' : '];');
+
+                // Composition (schema links); entities beyond the traversal depth come as ids only
+                for (const key in nodeData) {
+                    if (key === 'meta' || !typeSchema[key] || typeSchema[key].link === null || !nodeData[key]) continue;
+                    const linkedData = nodeData[key];
+                    const childId = linkedData.meta?.id || (typeof linkedData === 'string' ? linkedData : `${id}_${key}`);
+                    if (!linkedData.meta && !nodeDefs[childId]) nodeDefs[childId] = stubNode(childId, typeSchema[key].link);
+                    containment.add(`${id}->${childId}`);
+                    edgeDefs.push(`  ${dotQuote(id)} -> ${dotQuote(childId)} [label=${dotQuote(` ${key}`)}, dir=back, arrowtail=odiamond, color="#1565c0", fontcolor="#1565c0"];`);
+                }
+
+                const parentId = nodeData.meta.parent;
+                if (parentId && !containment.has(`${parentId}->${id}`)) {
+                    if (!nodeDefs[parentId]) nodeDefs[parentId] = stubNode(parentId, null);
+                    edgeDefs.push(`  ${dotQuote(id)} -> ${dotQuote(parentId)} [label=" belongs to", color="#9c27b0", fontcolor="#9c27b0", style="dashed"];`);
+                }
+
+                const upstreamId = nodeData.meta.upstream;
+                const execId = nodeData.meta.execution;
+                if (upstreamId && !nodeDefs[upstreamId]) nodeDefs[upstreamId] = stubNode(upstreamId, type);
+                if (execId) {
+                    executionLinks.push({ execId, upstreamId, id });
+                } else if (upstreamId) {
+                    edgeDefs.push(`  ${dotQuote(upstreamId)} -> ${dotQuote(id)} [label=" derived from", color="#e65100", fontcolor="#e65100", penwidth=2];`);
+                }
+            }
+
+            walkEntities(schema, data, processNode);
+
+            // Executions: upstream -> entity, plus EDMMapping inputs -> outputs. Without upstream or inputs the execution
+            // updated the entity in place and is drawn as a loop on it.
+            const drawnExecutionEdges = new Set();
+            function addExecutionEdge(source, target, execId) {
+                const key = `${source}->${target}`;
+                if (drawnExecutionEdges.has(key)) return;
+                drawnExecutionEdges.add(key);
+                const execution = executions[execId];
+                const label = [execution ? ` ⚙ ${execution.WorkflowID}` : ' ⚙ execution', ` ${shortId(execId)}`];
+                const tooltip = execution ? [`Execution ${execId}`, `${execution.WorkflowID} v${execution.WorkflowVersion}, ${execution.Status}`] : [`Execution ${execId}`];
+                edgeDefs.push(`  ${dotQuote(source)} -> ${dotQuote(target)} [label=${dotQuote(...label)}, tooltip=${dotQuote(...tooltip)}, color="#bf360c", fontcolor="#bf360c", penwidth=2${execution ? '' : ', style="dashed"'}];`);
+            }
+            for (const { execId, upstreamId, id } of executionLinks) {
+                const execution = executions[execId];
+                const { inputs, outputs } = execution ? executionEndpoints(execution) : { inputs: [], outputs: [] };
+                [...inputs, ...outputs].forEach(({ id: mappedId, mapping }) => {
+                    if (!nodeDefs[mappedId]) nodeDefs[mappedId] = stubNode(mappedId, mapping.EDMEntity);
+                });
+                const sources = inputs.map(input => input.id).filter(inputId => inputId !== id);
+                if (upstreamId) addExecutionEdge(upstreamId, id, execId);
+                else if (sources.length === 0) addExecutionEdge(id, id, execId);
+                const targets = new Set([id, ...outputs.map(output => output.id)]);
+                targets.forEach(target => sources.forEach(source => { if (source !== target) addExecutionEdge(source, target, execId); }));
+            }
+
+            return 'digraph G {\n' +
+                '  rankdir=LR; nodesep=0.4; ranksep=0.8;\n' +
+                '  node [shape=box, style="rounded,filled", fillcolor="#e3f2fd", color="#1565c0", fontname="Helvetica,Arial,sans-serif", fontsize=11];\n' +
+                '  edge [fontname="Helvetica,Arial,sans-serif", fontsize=9, color="#555555"];\n\n' +
+                Object.values(nodeDefs).join('\n') + '\n\n' +
+                edgeDefs.join('\n') + '\n}\n';
+        }
+
+        // --- RENDERING ---
+        const container = document.getElementById('graph-container');
+        let currentLink = null;
+
+        function resolveGraphLink() {
+            if (!graphLink) return null;
+            const filled = graphLink.replace(/\{(db|type|id|depth)\}/g, (match, name) => encodeURIComponent(entity[name]));
+            try {
+                const url = new URL(filled, location.href);
+                if (['http:', 'https:'].includes(url.protocol)) return url.href;
+            } catch (error) { /* invalid URL */ }
+            console.warn(`Ignoring link parameter, only http(s) URLs are allowed: ${graphLink}`);
+            return null;
+        }
+
+        container.addEventListener('click', (event) => {
+            if (currentLink && event.target.closest('svg')) window.open(currentLink, graphLinkTarget, 'noopener');
+        });
+
+        async function render() {
+            const { db, type, id, depth } = entity;
+            container.innerHTML = '<span class="status">Loading entity context...</span>';
+            try {
+                const query = `?max_level=${encodeURIComponent(depth)}&tracking=false&meta=true`;
+                const [schema, nodeData] = await Promise.all([
+                    fetchJson(`${edmUrl(db)}/schema`, 'Schema'),
+                    fetchJson(`${edmUrl(db)}/${encodeURIComponent(type)}/${encodeURIComponent(id)}${query}`, 'Data')
+                ]);
+
+                const execIds = new Set();
+                walkEntities(schema, nodeData, entity => { if (entity.meta.execution) execIds.add(entity.meta.execution); });
+                const executions = await fetchExecutions(execIds);
+
+                const viz = await Viz.instance();
+                const svg = viz.renderSVGElement(generateContextDot(schema, nodeData, executions));
+                container.innerHTML = '';
+                container.appendChild(svg);
+
+                currentLink = resolveGraphLink();
+                if (currentLink) {
+                    container.classList.add('linked');
+                    container.title = `Click to open ${currentLink}`;
+                }
+            } catch (error) {
+                container.innerHTML = `<p class="error">Error loading or rendering the entity context: ${escapeHtml(error.message)}</p>`;
+                console.error(error);
+            }
+        }
+
+        // Rendering starts from the login form once a token has been obtained.
+    </script>
+</body>
+</html>

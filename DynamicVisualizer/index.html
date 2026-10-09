@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Entity Browser</title>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.26.0/cytoscape.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
+
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/jsoneditor/9.10.0/jsoneditor.min.css" rel="stylesheet" type="text/css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsoneditor/9.10.0/jsoneditor.min.js"></script>
+
+    <style>
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; height: 100vh; background: #f4f7f6; color: #333; overflow: hidden; }
+        #graph-container { flex: 2; position: relative; border-right: 1px solid #ccc; background: #fff; }
+        #sidebar { flex: 1; padding: 20px; display: flex; flex-direction: column; background: #fafafa; min-width: 0; min-height: 0; overflow: hidden; }
+        #sidebar > :not(.inspector-panel) { flex-shrink: 0; }
+        [hidden] { display: none !important; }
+        #cy { width: 100%; height: 100%; position: absolute; top: 0; left: 0; outline: none; }
+        
+        h2 { margin-top: 0; font-size: 1.2rem; color: #1565c0; border-bottom: 2px solid #e3f2fd; padding-bottom: 10px; }
+        h3 { margin: 0 0 5px 0; }
+        
+        /* Inspector tabs; min-height: 0 lets a panel shrink to the space left in the sidebar, so it scrolls */
+        #inspector-tabs { display: flex; gap: 4px; border-bottom: 1px solid #ddd; }
+        #inspector-tabs button { border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: none; padding: 8px 12px; font: inherit; font-size: 0.9rem; color: #666; cursor: pointer; }
+        #inspector-tabs button:hover { color: #1565c0; }
+        #inspector-tabs button[aria-selected="true"] { color: #1565c0; border-bottom-color: #1565c0; font-weight: bold; }
+        .inspector-panel { flex: 1 1 0; min-height: 0; margin-top: 10px; }
+        #metadata-panel { overflow: auto; font-size: 0.9rem; }
+        #metadata-panel h4 { margin: 18px 0 6px; color: #1565c0; }
+        .muted { color: #888; }
+        .mono { font-family: 'Courier New', Courier, monospace; font-size: 0.85rem; }
+        .meta-table { width: 100%; border-collapse: collapse; }
+        .meta-table th { width: 1%; padding: 6px 12px 6px 0; text-align: left; vertical-align: top; white-space: nowrap; color: #666; font-weight: 600; }
+        .meta-table td { padding: 6px 0; word-break: break-word; }
+        .meta-table tr + tr > * { border-top: 1px solid #eee; }
+        .io-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        .io-table th { position: sticky; top: 0; background: #f0f4f8; text-align: left; padding: 5px 6px; color: #555; }
+        .io-table td { padding: 4px 6px; border-bottom: 1px solid #eee; word-break: break-word; }
+        .meta-link { padding: 0; border: 0; background: none; font: inherit; color: #d81b60; text-decoration: underline; cursor: pointer; text-align: left; }
+        .meta-link:hover { background-color: #fce4ec; }
+        .meta-sub { margin-top: 4px; }
+        .status-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.8rem; font-weight: bold; background: #eee; color: #555; }
+        .status-Finished { background: #e8f5e9; color: #2e7d32; }
+        .status-Failed { background: #ffebee; color: #c62828; }
+        .status-Running, .status-Scheduled, .status-Pending, .status-Created { background: #e3f2fd; color: #1565c0; }
+
+        /* JSON Editor Styling */
+        #jsoneditor { border: none; }
+        .jsoneditor { border: 1px solid #ddd !important; border-radius: 6px; overflow: hidden; }
+        .jsoneditor-menu { background-color: #1565c0 !important; border-bottom: none !important; }
+        .clickable-node-link { text-decoration: underline; cursor: pointer; color: #d81b60 !important; font-weight: bold; }
+        .clickable-node-link:hover { background-color: #fce4ec; }
+        
+        /* Copy Button Styling */
+        .id-container { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; }
+        .id-text { font-size: 0.8em; color: #666; font-family: 'Courier New', Courier, monospace; background: #eee; padding: 3px 6px; border-radius: 4px; }
+        .btn-copy { padding: 4px 8px; font-size: 0.75rem; border: 1px solid #ccc; background: #fff; border-radius: 4px; cursor: pointer; color: #555; transition: all 0.2s; font-weight: bold; }
+        .btn-copy:hover { background: #e3f2fd; border-color: #1565c0; color: #1565c0; }
+        .btn-copy.success { background: #e8f5e9; border-color: #4caf50; color: #2e7d32; }
+
+        /* Context Menu */
+        #context-menu { position: absolute; display: none; background: white; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 100; min-width: 150px; overflow: hidden; }
+        .context-menu-item { padding: 10px 15px; font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 8px; transition: background 0.2s; }
+        .context-menu-item:hover { background: #e3f2fd; color: #1565c0; }
+        .context-menu-separator { height: 1px; background: #eee; margin: 4px 0; }
+        
+        #loading { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); color: white; padding: 8px 15px; border-radius: 4px; z-index: 10; font-weight: bold; }
+        #login-panel { position: absolute; z-index: 20; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(340px, calc(100% - 48px)); padding: 20px; background: #fff; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.18); }
+        #login-panel h2 { margin-bottom: 16px; }
+        #login-form { display: grid; gap: 12px; }
+        #login-form label { display: grid; gap: 5px; font-size: 0.9rem; }
+        #login-form input { box-sizing: border-box; width: 100%; padding: 9px; border: 1px solid #bbb; border-radius: 4px; font: inherit; }
+        #login-form button { padding: 9px 12px; border: 0; border-radius: 4px; background: #1565c0; color: #fff; font: inherit; font-weight: bold; cursor: pointer; }
+        #login-form button:disabled { opacity: 0.6; cursor: wait; }
+        #login-error { margin: 0; color: #b00020; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+
+    <div id="graph-container">
+        <div id="loading">Fetching data...</div>
+        <div id="cy"></div>
+        <div id="context-menu"></div>
+        <section id="login-panel" aria-labelledby="login-title">
+            <h2 id="login-title">Sign in to MuPIF DB</h2>
+            <form id="login-form">
+                <label>Username<input name="username" autocomplete="username" required></label>
+                <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+                <button type="submit">Sign in</button>
+                <p id="login-error" role="alert"></p>
+            </form>
+        </section>
+    </div>
+
+    <div id="sidebar">
+        <h2>Inspector</h2>
+        <p style="color:#666; font-size: 0.9em;" id="instruction">Left-click a node or edge to inspect.<br/>Right-click a node for actions.</p>
+        
+        <div id="node-header"></div>
+        <div id="inspector-tabs" role="tablist" hidden>
+            <button type="button" role="tab" data-tab="metadata" aria-selected="true">Metadata</button>
+            <button type="button" role="tab" data-tab="data" aria-selected="false">Data</button>
+        </div>
+        <div id="metadata-panel" class="inspector-panel" role="tabpanel" hidden></div>
+        <p id="data-empty" class="inspector-panel muted" role="tabpanel" style="font-style: italic;" hidden></p>
+        <div id="jsoneditor" class="inspector-panel" role="tabpanel" hidden></div>
+    </div>
+
+    <script>
+const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
+        let cy;
+
+        // --- LIVE API CONFIGURATION ---
+        // A page linking to or embedding this one can choose the initial entity: index.html?db=…&type=…&id=…&depth=…
+        // (the API URL is deliberately not a parameter: a link could otherwise send the user's password to another server)
+        const pageParams = new URLSearchParams(location.search);
+        const API_ROOT_URL = "https://test.mupif.org/api/";
+        const EDM_DB_NAME = pageParams.get('db') || "dms_sysbet01";
+        const edmUrl = (dbName) => `${API_ROOT_URL}EDM/${encodeURIComponent(dbName || EDM_DB_NAME)}`;
+        const API_QUERY_PARAMS = `?max_level=${encodeURIComponent(pageParams.get('depth') || '2')}&tracking=false&meta=true`;
+        const INITIAL_NODE_ID = pageParams.get('id') || "6ab514418294832e099ab9d8";
+        const INITIAL_NODE_TYPE = pageParams.get('type') || "Calibration";
+        // --- AUTHENTICATION (same flow as getAuthToken() in mupifDB/api/client_mupif.py) ---
+        // Credentials are kept in memory only, so an expired token can be renewed by logging in again.
+        let apiCredentials = null;
+        let bearerToken = null;
+        let bearerTokenExpiresAt = 0; // ms since epoch
+        let authTokenPromise = null;
+
+        function parseTokenExpiration(token) {
+            // /login returns expires_at (ISO, microsecond precision); /refresh_token does not,
+            // so fall back to the JWT "exp" claim.
+            if (token.expires_at) {
+                const expiration = Date.parse(token.expires_at.replace(/(\.\d{3})\d+/, '$1'));
+                if (Number.isFinite(expiration)) return expiration;
+            }
+            try {
+                const payload = token.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+                const exp = JSON.parse(atob(payload)).exp;
+                if (Number.isFinite(exp)) return exp * 1000;
+            } catch (e) { /* not a decodable JWT */ }
+            return 0;
+        }
+
+        async function postAuthRequest(endpoint, options) {
+            const response = await fetch(`${API_ROOT_URL}${endpoint}`, { method: 'POST', ...options });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+            if (!body.access_token) throw new Error(`${endpoint} response did not include an access token.`);
+            bearerToken = body;
+            bearerTokenExpiresAt = parseTokenExpiration(body);
+        }
+
+        function login() {
+            return postAuthRequest('login', {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Accept': 'application/json'
+                },
+                body: new URLSearchParams({ grant_type: 'password', username: apiCredentials.username, password: apiCredentials.password })
+            });
+        }
+
+        function refreshToken() {
+            return postAuthRequest('refresh_token', {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'Authorization': `Bearer ${bearerToken.access_token}`
+                }
+            });
+        }
+
+        // Log in when there is no token or it (almost) expired, refresh it within 15 minutes of expiry.
+        // Concurrent callers share one pending request.
+        function getAuthToken({ forceLogin = false } = {}) {
+            if (!apiCredentials) return Promise.reject(new Error('Authentication required.'));
+            if (!authTokenPromise) {
+                authTokenPromise = (async () => {
+                    const now = Date.now();
+                    if (forceLogin || !bearerToken || now > bearerTokenExpiresAt - 10 * 1000) {
+                        await login();
+                    } else if (now > bearerTokenExpiresAt - 15 * 60 * 1000) {
+                        try {
+                            await refreshToken();
+                        } catch (error) {
+                            console.warn('Error refreshing auth token, logging in again:', error);
+                            await login();
+                        }
+                    }
+                    return bearerToken;
+                })().finally(() => { authTokenPromise = null; });
+            }
+            return authTokenPromise;
+        }
+
+        function showLoginPanel(message) {
+            bearerToken = null;
+            bearerTokenExpiresAt = 0;
+            apiCredentials = null;
+            document.getElementById('login-error').textContent = message;
+            document.getElementById('login-panel').style.display = 'block';
+        }
+
+        async function getRequestHeaders() {
+            try {
+                const token = await getAuthToken();
+                return { 'Authorization': `Bearer ${token.access_token}` };
+            } catch (error) {
+                showLoginPanel(`Session expired: ${error.message}`);
+                throw error;
+            }
+        }
+
+        async function fetchApi(url) {
+            let response = await fetch(url, { headers: await getRequestHeaders() });
+            if (response.status === 401 && apiCredentials) {
+                // Token rejected (e.g. server-side session ended): drop it so getAuthToken() logs in again, then retry once.
+                bearerToken = null;
+                response = await fetch(url, { headers: await getRequestHeaders() });
+            }
+            return response;
+        }
+
+        document.getElementById('login-form').addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const submitButton = form.querySelector('button[type="submit"]');
+            const errorElement = document.getElementById('login-error');
+            submitButton.disabled = true;
+            errorElement.textContent = '';
+            try {
+                apiCredentials = { username: form.elements.username.value, password: form.elements.password.value };
+                await getAuthToken({ forceLogin: true });
+                form.elements.password.value = '';
+                document.getElementById('login-panel').style.display = 'none';
+                if (!cy) await initializeApp();
+            } catch (error) {
+                apiCredentials = null;
+                errorElement.textContent = `Login failed: ${error.message}`;
+            } finally {
+                submitButton.disabled = false;
+            }
+        });
+        
+        window.copyNodeId = function(id) {
+            navigator.clipboard.writeText(id).then(() => {
+                const btn = document.getElementById('copy-btn');
+                if (btn) {
+                    btn.innerHTML = '✅ Copied!';
+                    btn.classList.add('success');
+                    setTimeout(() => { btn.innerHTML = '📋 Copy'; btn.classList.remove('success'); }, 1500);
+                }
+            }).catch(err => alert("Clipboard access denied."));
+        };
+
+        function highlightAndCenterNode(targetNode) {
+            cy.elements().unselect();
+            targetNode.select();
+            cy.animate({ center: { eles: targetNode }, zoom: 1.5 }, { duration: 400, easing: 'ease-in-out-cubic' });
+            targetNode.emit('tap'); 
+        }
+
+        const editorContainer = document.getElementById("jsoneditor");
+        const jsonEditor = new JSONEditor(editorContainer, {
+            mode: 'view', navigationBar: false, search: true,
+            onClassName: function({ path, field, value }) {
+                if (typeof value === 'string' && cy && cy.getElementById(value).length > 0) return 'clickable-node-link';
+            },
+            onEvent: function(node, event) {
+                if (event.type === 'click' && typeof node.value === 'string') {
+                    const targetNode = cy.getElementById(node.value);
+                    if (targetNode.length > 0) highlightAndCenterNode(targetNode);
+                }
+            }
+        });
+
+        // --- PARSER ---
+        // EDMMapping entries may point to other EDM databases, each with its own schema.
+        const schemaCache = {};
+        async function getSchema(dbName) {
+            dbName = dbName || EDM_DB_NAME;
+            if (!schemaCache[dbName]) {
+                const response = await fetchApi(`${edmUrl(dbName)}/schema`);
+                if (!response.ok) throw new Error(`Schema Fetch Failed (${dbName}): ${response.status}`);
+                schemaCache[dbName] = await response.json();
+            }
+            return schemaCache[dbName];
+        }
+
+        function parseToCytoscape(schema, rootData, dbName = EDM_DB_NAME) {
+            const elements = [];
+            const processedIds = new Set();
+            const definedEdges = new Set();
+
+            function safeAddEdge(source, target, label, classes, fullData = null, isLoaded = true, execId = null) {
+                const forwardKey = `e_${source}_${target}`;
+                const reverseKey = `e_${target}_${source}`;
+                
+                // 1. Prevent cycles within the current JSON parsing run
+                if (definedEdges.has(reverseKey)) return; 
+                
+                // 2. Prevent cycles against the EXISTING global graph
+                if (cy && cy.getElementById(reverseKey).length > 0) return;
+                
+                definedEdges.add(forwardKey);
+                
+                elements.push({ 
+                    group: 'edges', 
+                    data: { id: forwardKey, source: source, target: target, label: label, fullData: fullData, isLoaded: isLoaded, execId: execId },
+                    classes: classes
+                });
+            }
+
+            function processNode(nodeData) {
+                if (!nodeData || !nodeData.meta || processedIds.has(nodeData.meta.id)) return;
+                const id = nodeData.meta.id;
+                const type = nodeData.meta.type || "Unknown";
+                processedIds.add(id);
+
+                elements.push({ group: 'nodes', data: { id: id, label: `[-] ${type}\n(${shortId(id)})`, type: type, dbName: dbName, fullData: nodeData, isLoaded: true }, classes: 'loaded' });
+
+                const upId = nodeData.meta.upstream;
+                const execId = nodeData.meta.execution;
+                if (upId && !processedIds.has(upId)) {
+                    elements.push({ group: 'nodes', data: { id: upId, label: `[+] Unloaded\n(${shortId(upId)})`, type: type, dbName: dbName, isLoaded: false, fullData: { meta: { id: upId, type: type } } }, classes: 'stub' });
+                }
+                if (execId) {
+                    // Special edge for the execution that produced this entity (details come from /api/executions/{id}).
+                    // Without an upstream entity the execution updated it in place, so the edge is a loop on the node.
+                    safeAddEdge(upId || id, id, `Exec: ${shortId(execId)}`, 'process-edge execution-edge stub-edge', { meta: { type: 'Execution', id: execId } }, false, execId);
+                } else if (upId) {
+                    safeAddEdge(upId, id, 'derived from', 'process-edge', null, true);
+                }
+
+                if (nodeData.meta.parent) {
+                    const pId = nodeData.meta.parent;
+                    if (!processedIds.has(pId)) {
+                        elements.push({ group: 'nodes', data: { id: pId, label: `[+] Unloaded\n(${shortId(pId)})`, type: "Unknown", dbName: dbName, isLoaded: false, fullData: { meta: { id: pId, type: "Unknown" } } }, classes: 'stub' });
+                    }
+                    safeAddEdge(id, pId, 'belongs to', 'parent-edge', null, true);
+                }
+
+                const typeSchema = schema[type] || {};
+                for (const key in nodeData) {
+                    if (key === 'meta') continue;
+                    if (typeSchema[key] && typeSchema[key].link !== null) {
+                        const linkedData = nodeData[key];
+                        const targetType = typeSchema[key].link; 
+                        
+                        if (linkedData && linkedData.meta && linkedData.meta.id) {
+                            const childId = linkedData.meta.id;
+                            safeAddEdge(id, childId, key, 'containment-edge', null, true);
+                            processNode(linkedData); 
+                        } else if (linkedData) {
+                            const stubId = typeof linkedData === 'string' ? linkedData : (id + "_" + key);
+                            elements.push({ group: 'nodes', data: { id: stubId, label: `[+] Unloaded\n(${targetType})`, type: targetType, isLoaded: false, fullData: { meta: { id: stubId, type: targetType } } }, classes: 'stub' });
+                            safeAddEdge(id, stubId, key, 'containment-edge', null, true);
+                        }
+                    }
+                }
+            }
+
+            processNode(rootData);
+            return elements;
+        }
+
+        function runLayout() { cy.layout({ name: 'dagre', rankDir: 'LR', nodeSep: 50, rankSep: 150, animate: true, animationDuration: 400 }).run(); }
+
+        // --- SMART MERGE LOGIC ---
+        // This handles deduplication AND upgrading stubs into loaded nodes
+        function mergeIntoGraph(newElements) {
+            const elementsToAdd = [];
+
+            newElements.forEach(ele => {
+                const existingEle = cy.getElementById(ele.data.id);
+                
+                if (existingEle.length === 0) {
+                    // Completely new node/edge, queue it for addition
+                    elementsToAdd.push(ele);
+                } else {
+                    // Element already exists! Let's check if we need to upgrade it.
+                    if (ele.group === 'nodes') {
+                        if (!existingEle.data('isLoaded') && ele.data.isLoaded) {
+                            // Upgrade existing stub to a fully loaded node
+                            existingEle.data('fullData', ele.data.fullData);
+                            existingEle.data('isLoaded', true);
+                            existingEle.data('type', ele.data.type);
+                            existingEle.data('label', ele.data.label);
+                            existingEle.removeClass('stub').addClass('loaded');
+                        }
+                    } else if (ele.group === 'edges') {
+                        if (!existingEle.data('isLoaded') && ele.data.isLoaded) {
+                            // Upgrade existing dashed edge to a solid process edge
+                            existingEle.data('fullData', ele.data.fullData);
+                            existingEle.data('isLoaded', true);
+                            existingEle.removeClass('stub-edge').addClass('loaded-edge');
+                        }
+                    }
+                }
+            });
+
+            // Add all the purely new elements to the canvas at once
+            if (elementsToAdd.length > 0) {
+                cy.add(elementsToAdd);
+            }
+        }
+
+        // --- FETCH & EXPAND ---
+        window.expandEntity = async function(eleId) {
+            document.getElementById('loading').style.display = 'block';
+            const targetEle = cy.getElementById(eleId);
+            
+            const dataMeta = targetEle.data('fullData')?.meta || {};
+            const entityId = dataMeta.id;
+            const entityType = dataMeta.type || targetEle.data('type');
+            
+            if (!entityId || !entityType) {
+                alert("Cannot fetch data: Missing ID or Type.");
+                document.getElementById('loading').style.display = 'none';
+                return;
+            }
+
+            const dbName = targetEle.data('dbName') || EDM_DB_NAME;
+            const fetchUrl = `${edmUrl(dbName)}/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}${API_QUERY_PARAMS}`;
+
+            try {
+                console.log(`Fetching data from: ${fetchUrl}`);
+                const [schema, response] = await Promise.all([getSchema(dbName), fetchApi(fetchUrl)]);
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const newData = await response.json();
+
+                // Parse the new data
+                const newElements = parseToCytoscape(schema, newData, dbName);
+
+                // Intelligently merge the JSON into the existing graph
+                mergeIntoGraph(newElements);
+
+                runLayout();
+                targetEle.emit('tap');
+
+            } catch (error) {
+                console.error("Fetch failed:", error);
+                alert(`Failed to load data from:\n${fetchUrl}\n\nError: ${error.message}`);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        };
+
+        // --- EXECUTIONS ---
+        // Builds execution edges from EDMMapping: every input entity -> every output entity.
+        // A mapping is an output when OutputsData writes to it (EDMPath "Name.attr") or it creates new entities
+        // (createNew holds ids); otherwise it is an input. An execution without inputs is drawn as a loop on its outputs.
+        function parseExecution(execution, execId, producedId) {
+            const elements = [];
+            const pathNames = (items) => new Set((items || []).filter(item => item.EDMPath).map(item => item.EDMPath.split('.')[0]));
+            const inputNames = pathNames(execution.InputsData);
+            const outputNames = pathNames(execution.OutputsData);
+            const refIds = (ref) => ref ? [ref.id, ...(ref.ids || [])].filter(Boolean) : [];
+
+            const inputs = new Set();
+            const outputs = new Set([producedId]);
+            for (const mapping of execution.EDMMapping || []) {
+                const ownIds = refIds(mapping);
+                const newIds = refIds(mapping.createNew);
+                const isOutput = outputNames.has(mapping.Name) || newIds.length > 0;
+                const isInput = inputNames.has(mapping.Name) || !isOutput;
+                const mappedIds = [...(isInput ? ownIds : []), ...(isOutput ? (newIds.length ? newIds : ownIds) : [])];
+                mappedIds.forEach(id => {
+                    if (cy.getElementById(id).length > 0 || elements.some(ele => ele.data.id === id)) return;
+                    const type = mapping.EDMEntity || 'Unknown';
+                    elements.push({ group: 'nodes', data: { id: id, label: `[+] ${type}\n(${shortId(id)})`, type: type, dbName: mapping.DBName || EDM_DB_NAME, isLoaded: false, fullData: { meta: { id: id, type: type } } }, classes: 'stub' });
+                });
+                if (isInput) ownIds.forEach(id => inputs.add(id));
+                if (isOutput) (newIds.length ? newIds : ownIds).forEach(id => outputs.add(id));
+            }
+
+            outputs.forEach(outId => {
+                (inputs.size ? inputs : [outId]).forEach(inId => {
+                    const edgeId = `e_${inId}_${outId}`;
+                    if (cy.getElementById(edgeId).length > 0 || cy.getElementById(`e_${outId}_${inId}`).length > 0) return;
+                    if (elements.some(ele => ele.data.id === edgeId)) return;
+                    elements.push({ group: 'edges', data: { id: edgeId, source: inId, target: outId, label: '', fullData: null, isLoaded: false, execId: execId }, classes: 'process-edge execution-edge stub-edge' });
+                });
+            });
+            return elements;
+        }
+
+        window.expandExecution = async function(edgeId) {
+            document.getElementById('loading').style.display = 'block';
+            const edge = cy.getElementById(edgeId);
+            const execId = edge.data('execId');
+            const fetchUrl = `${API_ROOT_URL}executions/${execId}`;
+
+            try {
+                console.log(`Fetching execution from: ${fetchUrl}`);
+                const response = await fetchApi(fetchUrl);
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const execution = (await response.json()).entity;
+
+                mergeIntoGraph(parseExecution(execution, execId, edge.target().id()));
+
+                // All edges of this execution (including ones added from other entities) share its details
+                const fullData = { meta: { type: 'Execution', id: execId }, ...execution };
+                const label = `⚙ ${execution.WorkflowID} v${execution.WorkflowVersion}\n${execution.Status}`;
+                cy.edges().filter(e => e.data('execId') === execId).forEach(e => {
+                    e.data({ fullData: fullData, isLoaded: true, label: label });
+                    e.removeClass('stub-edge').addClass('loaded-edge');
+                });
+
+                runLayout();
+                edge.emit('tap');
+            } catch (error) {
+                console.error("Fetch failed:", error);
+                alert(`Failed to load execution from:\n${fetchUrl}\n\nError: ${error.message}`);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        };
+
+        window.collapseNode = function(nodeId) {
+            const targetNode = cy.getElementById(nodeId);
+            cy.remove(targetNode.connectedEdges());
+            targetNode.neighborhood('node').forEach(n => { if (n.connectedEdges().length === 0) cy.remove(n); });
+
+            const type = targetNode.data('type');
+            targetNode.removeClass('loaded').addClass('stub');
+            targetNode.data('isLoaded', false);
+            targetNode.data('label', `[+] Unloaded\n(${shortId(nodeId)})`);
+            targetNode.data('fullData', { meta: { id: nodeId, type: type } });
+
+            runLayout();
+            targetNode.emit('tap'); 
+        };
+
+        // --- SIDEBAR RENDERER ---
+        const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+        const NONE_HTML = '<span class="muted">–</span>';
+        const executionEdges = (execId) => cy.edges().filter(e => e.data('execId') === execId);
+        let activeInspectorTab = 'metadata';
+        let inspectorHasData = false;
+
+        function showInspectorTab(tab) {
+            activeInspectorTab = tab;
+            document.querySelectorAll('#inspector-tabs [role="tab"]').forEach(btn => btn.setAttribute('aria-selected', String(btn.dataset.tab === tab)));
+            document.getElementById('metadata-panel').hidden = tab !== 'metadata';
+            document.getElementById('jsoneditor').hidden = tab !== 'data' || !inspectorHasData;
+            document.getElementById('data-empty').hidden = tab !== 'data' || inspectorHasData;
+        }
+
+        document.getElementById('inspector-tabs').addEventListener('click', (event) => {
+            const tab = event.target.closest('[role="tab"]');
+            if (tab) showInspectorTab(tab.dataset.tab);
+        });
+
+        document.getElementById('metadata-panel').addEventListener('click', (event) => {
+            const link = event.target.closest('[data-node-id], [data-execution-id], [data-load-execution]');
+            if (!link) return;
+            if (link.dataset.nodeId) highlightAndCenterNode(cy.getElementById(link.dataset.nodeId));
+            else if (link.dataset.executionId) highlightAndCenterNode(executionEdges(link.dataset.executionId).first());
+            else expandExecution(link.dataset.loadExecution);
+        });
+
+        // An id that selects its node (or its execution edge) when it is in the graph, plain text otherwise
+        function idLink(id, kind = 'node') {
+            if (!id) return NONE_HTML;
+            const text = `<span class="mono">${escapeHtml(id)}</span>`;
+            const inGraph = kind === 'execution' ? executionEdges(id).length > 0 : cy.getElementById(id).length > 0;
+            return inGraph ? `<button type="button" class="meta-link" data-${kind}-id="${escapeHtml(id)}">${text}</button>` : text;
+        }
+
+        const metaTable = (rows) => `<table class="meta-table"><tbody>${rows.map(([label, html]) => `<tr><th>${escapeHtml(label)}</th><td>${html}</td></tr>`).join('')}</tbody></table>`;
+        const statusBadge = (status) => `<span class="status-badge status-${escapeHtml(status)}">${escapeHtml(status || 'Unknown')}</span>`;
+        const loadExecutionButton = (edgeId) => `<button type="button" class="btn-copy" data-load-execution="${escapeHtml(edgeId)}">⬇ Load execution details</button>`;
+
+        // Server dates are ISO strings with microseconds, e.g. "2026-09-24T14:22:12.594780"
+        const formatDate = (value) => value ? escapeHtml(String(value).replace('T', ' ').replace(/\.\d+/, '')) : NONE_HTML;
+        function parseServerDate(value) {
+            const time = value ? Date.parse(String(value).replace(/(\.\d{3})\d+/, '$1')) : NaN;
+            return Number.isFinite(time) ? time : null;
+        }
+        function formatDuration(ms) {
+            const total = Math.round(ms / 1000);
+            const h = Math.floor(total / 3600), m = Math.floor(total % 3600 / 60), s = total % 60;
+            return [h ? `${h} h` : '', h || m ? `${m} min` : '', `${s} s`].filter(Boolean).join(' ');
+        }
+        function formatValue(value) {
+            if (value === null || value === undefined || value === '') return NONE_HTML;
+            const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+            return escapeHtml(text.length > 60 ? text.slice(0, 57) + '…' : text);
+        }
+
+        function renderEntityMetadata(ele) {
+            const meta = ele.data('fullData')?.meta || {};
+            let executionHtml = idLink(meta.execution, 'execution');
+            if (meta.execution) {
+                const execEdge = executionEdges(meta.execution).first();
+                if (execEdge.data('isLoaded')) {
+                    const execution = execEdge.data('fullData');
+                    executionHtml += `<div class="meta-sub">⚙ ${escapeHtml(execution.WorkflowID)} <span class="muted">v${escapeHtml(execution.WorkflowVersion)}</span> ${statusBadge(execution.Status)}</div>`;
+                } else if (execEdge.length > 0) {
+                    executionHtml += `<div class="meta-sub">${loadExecutionButton(execEdge.id())}</div>`;
+                }
+            }
+            const known = ['id', 'type', 'parent', 'upstream', 'execution'];
+            return metaTable([
+                ['Type', escapeHtml(meta.type || ele.data('type'))],
+                ['Database', escapeHtml(ele.data('dbName') || EDM_DB_NAME)],
+                ['Parent', idLink(meta.parent)],
+                ['Upstream', idLink(meta.upstream)],
+                ['Execution', executionHtml],
+                ...Object.keys(meta).filter(key => !known.includes(key)).map(key => [key, formatValue(meta[key])]),
+                ['Data', ele.data('isLoaded') ? 'Loaded' : '<span class="muted">Not loaded (right-click → Fetch & Expand)</span>']
+            ]);
+        }
+
+        function ioTable(title, items) {
+            items = items || [];
+            if (items.length === 0) return `<h4>${title}</h4><p class="muted">None</p>`;
+            const edmPathCell = (item) => {
+                if (!item.EDMPath) return NONE_HTML;
+                const inGraph = item.edmEntityId && cy.getElementById(item.edmEntityId).length > 0;
+                const title = escapeHtml(`${item.edmEntityType || ''} ${item.edmEntityId || ''}`.trim());
+                return inGraph
+                    ? `<button type="button" class="meta-link mono" title="${title}" data-node-id="${escapeHtml(item.edmEntityId)}">${escapeHtml(item.EDMPath)}</button>`
+                    : `<span class="mono" title="${title}">${escapeHtml(item.EDMPath)}</span>`;
+            };
+            const rows = items.map(item => `<tr><td>${escapeHtml(item.Name)}</td><td>${edmPathCell(item)}</td><td>${item.Units ? escapeHtml(item.Units) : NONE_HTML}</td><td>${formatValue(item.Value)}</td></tr>`).join('');
+            return `<h4>${title} <span class="muted">(${items.length})</span></h4>
+                <table class="io-table"><thead><tr><th>Name</th><th>EDMPath</th><th>Units</th><th>Value</th></tr></thead><tbody>${rows}</tbody></table>`;
+        }
+
+        function renderExecutionMetadata(ele) {
+            if (!ele.data('isLoaded')) {
+                return `<p class="muted">Execution details are not loaded yet.</p>${loadExecutionButton(ele.id())}`;
+            }
+            const execution = ele.data('fullData');
+            const start = parseServerDate(execution.StartDate);
+            const end = parseServerDate(execution.EndDate);
+            const duration = start !== null && end !== null ? formatDuration(end - start) : (start !== null ? '<span class="muted">still running</span>' : NONE_HTML);
+            return metaTable([
+                ['Workflow', `${escapeHtml(execution.WorkflowID)} <span class="muted">v${escapeHtml(execution.WorkflowVersion)}</span>`],
+                ['Status', statusBadge(execution.Status)],
+                ['Requested by', execution.RequestedBy ? escapeHtml(execution.RequestedBy) : NONE_HTML],
+                ['Created', formatDate(execution.CreatedDate)],
+                ['Submitted', formatDate(execution.SubmittedDate)],
+                ['Started', formatDate(execution.StartDate)],
+                ['Ended', formatDate(execution.EndDate)],
+                ['Duration', duration],
+                ['Attempts', escapeHtml(execution.Attempts ?? '')],
+                ...(execution.label ? [['Label', escapeHtml(execution.label)]] : [])
+            ]) + ioTable('Inputs', execution.InputsData) + ioTable('Outputs', execution.OutputsData);
+        }
+
+        function renderLinkMetadata(ele) {
+            return metaTable([
+                ['Relation', escapeHtml(ele.data('label'))],
+                ['From', idLink(ele.source().id())],
+                ['To', idLink(ele.target().id())]
+            ]);
+        }
+
+        function renderSidebarData(ele) {
+            const data = ele.data('fullData');
+            const isNode = ele.isNode();
+
+            document.getElementById('instruction').style.display = 'none';
+            document.getElementById('inspector-tabs').hidden = false;
+
+            let typeLabel = data?.meta?.type || (isNode ? 'Unknown Node' : 'Link');
+            let entityId = data?.meta?.id || '';
+            
+            let headerHtml = `<h3>${typeLabel}</h3>`;
+            if (entityId) {
+                headerHtml += `
+                    <div class="id-container">
+                        <span class="id-text">${entityId}</span>
+                        <button id="copy-btn" class="btn-copy" onclick="copyNodeId('${entityId}')">📋 Copy</button>
+                    </div>`;
+            } else if (!isNode) {
+                headerHtml += `<p style="color:#666; font-size:0.9em; margin-top:0;">${ele.data('label')}</p>`;
+            }
+            document.getElementById('node-header').innerHTML = headerHtml;
+
+            // Metadata tab
+            const metadataPanel = document.getElementById('metadata-panel');
+            if (ele.data('execId')) metadataPanel.innerHTML = renderExecutionMetadata(ele);
+            else if (isNode) metadataPanel.innerHTML = renderEntityMetadata(ele);
+            else metadataPanel.innerHTML = renderLinkMetadata(ele);
+
+            // Data tab
+            inspectorHasData = Boolean(data) && Boolean(ele.data('isLoaded'));
+            if (inspectorHasData) {
+                jsonEditor.set(data);
+                jsonEditor.expand({ path: function (path) { return path.length <= 2; } });
+            } else {
+                document.getElementById('data-empty').textContent = data
+                    ? 'Data unloaded. Right-click in the graph to fetch and expand.'
+                    : 'No detailed properties for this link.';
+            }
+            showInspectorTab(activeInspectorTab);
+        }
+
+        // --- REAL LIVE INITIALIZATION ---
+        async function initializeApp() {
+            try {
+                const [schema, dataRes] = await Promise.all([
+                    getSchema(EDM_DB_NAME),
+                    fetchApi(`${edmUrl(EDM_DB_NAME)}/${encodeURIComponent(INITIAL_NODE_TYPE)}/${encodeURIComponent(INITIAL_NODE_ID)}${API_QUERY_PARAMS}`)
+                ]);
+
+                if (!dataRes.ok) throw new Error(`Data Fetch Failed: ${dataRes.status}`);
+
+                const rootData = await dataRes.json();
+
+                cy = cytoscape({
+                    container: document.getElementById('cy'),
+                    elements: parseToCytoscape(schema, rootData, EDM_DB_NAME),
+                    wheelSensitivity: 0.2, minZoom: 0.1, maxZoom: 5,
+                    style: [
+                        { selector: 'node', style: { 'label': 'data(label)', 'text-wrap': 'wrap', 'text-valign': 'center', 'text-halign': 'center', 'shape': 'round-rectangle', 'width': 130, 'height': 55, 'font-size': 11, 'font-weight': 'bold', 'color': '#fff', 'transition-property': 'background-color, border-color, border-width', 'transition-duration': '0.3s' } },
+                        { selector: 'node.loaded', style: { 'background-color': '#1565c0' } },
+                        { selector: 'node.stub', style: { 'background-color': '#fff', 'border-width': 2, 'border-color': '#1565c0', 'border-style': 'solid', 'color': '#1565c0' } },
+                        { selector: 'node:selected', style: { 'border-width': 5, 'border-color': '#ffca28', 'background-color': '#0d47a1' } },
+                        
+                        { selector: 'edge', style: { 'width': 3, 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'label': 'data(label)', 'font-size': 10, 'text-background-opacity': 0.9, 'text-background-color': '#fff', 'text-margin-y': -10, 'transition-property': 'line-color, width, line-style', 'transition-duration': '0.2s' } },
+                        
+                        { selector: 'edge.process-edge', style: { 'line-color': '#e65100', 'target-arrow-color': '#e65100', 'color': '#e65100' } },
+                        { selector: 'edge.stub-edge', style: { 'line-style': 'dashed' } },
+                        { selector: 'edge.loaded-edge', style: { 'line-style': 'solid', 'width': 4 } },
+                        { selector: 'edge.execution-edge', style: { 'text-wrap': 'wrap', 'font-weight': 'bold', 'loop-direction': '-45deg', 'loop-sweep': '-60deg', 'control-point-step-size': 70 } },
+                        { selector: 'edge.execution-edge.loaded-edge', style: { 'line-color': '#bf360c', 'target-arrow-color': '#bf360c', 'width': 5 } },
+                        
+                        { selector: 'edge.parent-edge', style: { 'line-color': '#ba68c8', 'target-arrow-color': '#ba68c8', 'line-style': 'dashed', 'color': '#ba68c8' } },
+                        { selector: 'edge.containment-edge', style: { 'line-color': '#64b5f6', 'target-arrow-shape': 'none', 'source-arrow-shape': 'diamond', 'source-arrow-color': '#64b5f6', 'color': '#1565c0' } },
+                        { selector: 'edge:selected', style: { 'width': 6, 'line-color': '#d81b60', 'target-arrow-color': '#d81b60', 'source-arrow-color': '#d81b60' } }
+                    ]
+                });
+
+                document.getElementById('loading').style.display = 'none';
+                runLayout();
+
+                cy.on('tap', 'node, edge', function(evt){ renderSidebarData(evt.target); });
+                
+                const contextMenu = document.getElementById('context-menu');
+                
+                cy.on('cxttap', 'node, edge', function(evt) {
+                    const ele = evt.target;
+                    let menuHtml = '';
+                    
+                    if (ele.isNode() || ele.data('execId')) {
+                        if (!ele.data('isLoaded')) {
+                            const expandFn = ele.isNode() ? 'expandEntity' : 'expandExecution';
+                            menuHtml += `<div class="context-menu-item" onclick="${expandFn}('${ele.id()}'); document.getElementById('context-menu').style.display='none'">➕ Fetch & Expand</div>`;
+                        } else if (ele.isNode()) {
+                            menuHtml += `<div class="context-menu-item" onclick="collapseNode('${ele.id()}'); document.getElementById('context-menu').style.display='none'">➖ Collapse Data</div>`;
+                        }
+                        menuHtml += `<div class="context-menu-separator"></div>`;
+                    }
+                    
+                    menuHtml += `<div class="context-menu-item" onclick="document.getElementById('context-menu').style.display='none'; cy.getElementById('${ele.id()}').emit('tap');">👁️ Inspect in Sidebar</div>`;
+
+                    contextMenu.innerHTML = menuHtml;
+                    contextMenu.style.display = 'block';
+                    contextMenu.style.left = evt.originalEvent.clientX + 'px';
+                    contextMenu.style.top = evt.originalEvent.clientY + 'px';
+                });
+
+                cy.on('tap', function(evt) {
+                    if (evt.target === cy || evt.target.isNode() || evt.target.isEdge()) {
+                        contextMenu.style.display = 'none';
+                    }
+                });
+
+                if(cy.nodes().length > 0) cy.nodes().first().emit('tap');
+
+            } catch (error) {
+                document.getElementById('loading').innerHTML = `<span style="color:#ff5252">Network Error!</span><br/><small>${error.message}</small>`;
+                console.error(error);
+            }
+        }
+
+        // initializeApp() is started by the login form once a token has been obtained.
+    </script>
+</body>
+</html>
