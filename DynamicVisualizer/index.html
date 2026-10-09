@@ -292,12 +292,15 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
             return schemaCache[dbName];
         }
 
+        const execNodeId = (execId) => `exec_${execId}`;
+        const executionNodeElement = (execId) => ({ group: 'nodes', data: { id: execNodeId(execId), label: `⚙ Execution\n(${shortId(execId)})`, execId: execId, isLoaded: false, fullData: { meta: { type: 'Execution', id: execId } } }, classes: 'execution stub' });
+
         function parseToCytoscape(schema, rootData, dbName = EDM_DB_NAME) {
             const elements = [];
             const processedIds = new Set();
             const definedEdges = new Set();
 
-            function safeAddEdge(source, target, label, classes, fullData = null, isLoaded = true, execId = null) {
+            function safeAddEdge(source, target, label, classes, fullData = null, isLoaded = true) {
                 const forwardKey = `e_${source}_${target}`;
                 const reverseKey = `e_${target}_${source}`;
                 
@@ -311,7 +314,7 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
                 
                 elements.push({ 
                     group: 'edges', 
-                    data: { id: forwardKey, source: source, target: target, label: label, fullData: fullData, isLoaded: isLoaded, execId: execId },
+                    data: { id: forwardKey, source: source, target: target, label: label, fullData: fullData, isLoaded: isLoaded },
                     classes: classes
                 });
             }
@@ -330,9 +333,11 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
                     elements.push({ group: 'nodes', data: { id: upId, label: `[+] Unloaded\n(${shortId(upId)})`, type: type, dbName: dbName, isLoaded: false, fullData: { meta: { id: upId, type: type } } }, classes: 'stub' });
                 }
                 if (execId) {
-                    // Special edge for the execution that produced this entity (details come from /api/executions/{id}).
-                    // Without an upstream entity the execution updated it in place, so the edge is a loop on the node.
-                    safeAddEdge(upId || id, id, `Exec: ${shortId(execId)}`, 'process-edge execution-edge stub-edge', { meta: { type: 'Execution', id: execId } }, false, execId);
+                    // The execution that produced this entity is a node of its own (details come from /api/executions/{id}).
+                    const execNode = execNodeId(execId);
+                    if (!elements.some(ele => ele.data.id === execNode)) elements.push(executionNodeElement(execId));
+                    if (upId) safeAddEdge(upId, execNode, '', 'process-edge');
+                    safeAddEdge(execNode, id, '', 'process-edge');
                 } else if (upId) {
                     safeAddEdge(upId, id, 'derived from', 'process-edge', null, true);
                 }
@@ -452,18 +457,19 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
         };
 
         // --- EXECUTIONS ---
-        // Builds execution edges from EDMMapping: every input entity -> every output entity.
+        // Links the execution node from every input entity and to every output entity of EDMMapping (edge label = mapping name).
         // A mapping is an output when OutputsData writes to it (EDMPath "Name.attr") or it creates new entities
-        // (createNew holds ids); otherwise it is an input. An execution without inputs is drawn as a loop on its outputs.
-        function parseExecution(execution, execId, producedId) {
+        // (createNew holds ids); otherwise it is an input.
+        function parseExecution(execution, execId) {
             const elements = [];
+            const execNode = execNodeId(execId);
             const pathNames = (items) => new Set((items || []).filter(item => item.EDMPath).map(item => item.EDMPath.split('.')[0]));
             const inputNames = pathNames(execution.InputsData);
             const outputNames = pathNames(execution.OutputsData);
             const refIds = (ref) => ref ? [ref.id, ...(ref.ids || [])].filter(Boolean) : [];
 
-            const inputs = new Set();
-            const outputs = new Set([producedId]);
+            const inputs = new Map();
+            const outputs = new Map();
             for (const mapping of execution.EDMMapping || []) {
                 const ownIds = refIds(mapping);
                 const newIds = refIds(mapping.createNew);
@@ -475,25 +481,26 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
                     const type = mapping.EDMEntity || 'Unknown';
                     elements.push({ group: 'nodes', data: { id: id, label: `[+] ${type}\n(${shortId(id)})`, type: type, dbName: mapping.DBName || EDM_DB_NAME, isLoaded: false, fullData: { meta: { id: id, type: type } } }, classes: 'stub' });
                 });
-                if (isInput) ownIds.forEach(id => inputs.add(id));
-                if (isOutput) (newIds.length ? newIds : ownIds).forEach(id => outputs.add(id));
+                if (isInput) ownIds.forEach(id => inputs.set(id, mapping.Name));
+                if (isOutput) (newIds.length ? newIds : ownIds).forEach(id => outputs.set(id, mapping.Name));
             }
 
-            outputs.forEach(outId => {
-                (inputs.size ? inputs : [outId]).forEach(inId => {
-                    const edgeId = `e_${inId}_${outId}`;
-                    if (cy.getElementById(edgeId).length > 0 || cy.getElementById(`e_${outId}_${inId}`).length > 0) return;
-                    if (elements.some(ele => ele.data.id === edgeId)) return;
-                    elements.push({ group: 'edges', data: { id: edgeId, source: inId, target: outId, label: '', fullData: null, isLoaded: false, execId: execId }, classes: 'process-edge execution-edge stub-edge' });
-                });
-            });
+            const addEdge = (source, target, label) => {
+                const edgeId = `e_${source}_${target}`;
+                if (cy.getElementById(edgeId).length > 0 || cy.getElementById(`e_${target}_${source}`).length > 0) return;
+                if (elements.some(ele => ele.data.id === edgeId)) return;
+                elements.push({ group: 'edges', data: { id: edgeId, source: source, target: target, label: label || '', fullData: null, isLoaded: true }, classes: 'process-edge' });
+            };
+            // An entity that is both input and output (updated in place) gets only the outgoing edge.
+            inputs.forEach((name, id) => { if (!outputs.has(id)) addEdge(id, execNode, name); });
+            outputs.forEach((name, id) => addEdge(execNode, id, name));
             return elements;
         }
 
-        window.expandExecution = async function(edgeId) {
+        window.expandExecution = async function(nodeId) {
             document.getElementById('loading').style.display = 'block';
-            const edge = cy.getElementById(edgeId);
-            const execId = edge.data('execId');
+            const execNode = cy.getElementById(nodeId);
+            const execId = execNode.data('execId');
             const fetchUrl = `${API_ROOT_URL}executions/${execId}`;
 
             try {
@@ -502,18 +509,17 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                 const execution = (await response.json()).entity;
 
-                mergeIntoGraph(parseExecution(execution, execId, edge.target().id()));
+                mergeIntoGraph(parseExecution(execution, execId));
 
-                // All edges of this execution (including ones added from other entities) share its details
-                const fullData = { meta: { type: 'Execution', id: execId }, ...execution };
-                const label = `⚙ ${execution.WorkflowID} v${execution.WorkflowVersion}\n${execution.Status}`;
-                cy.edges().filter(e => e.data('execId') === execId).forEach(e => {
-                    e.data({ fullData: fullData, isLoaded: true, label: label });
-                    e.removeClass('stub-edge').addClass('loaded-edge');
+                execNode.data({
+                    fullData: { meta: { type: 'Execution', id: execId }, ...execution },
+                    isLoaded: true,
+                    label: `⚙ ${execution.WorkflowID} v${execution.WorkflowVersion}\n${execution.Status}`
                 });
+                execNode.removeClass('stub').addClass('loaded');
 
                 runLayout();
-                edge.emit('tap');
+                execNode.emit('tap');
             } catch (error) {
                 console.error("Fetch failed:", error);
                 alert(`Failed to load execution from:\n${fetchUrl}\n\nError: ${error.message}`);
@@ -540,7 +546,7 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
         // --- SIDEBAR RENDERER ---
         const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
         const NONE_HTML = '<span class="muted">–</span>';
-        const executionEdges = (execId) => cy.edges().filter(e => e.data('execId') === execId);
+        const executionNode = (execId) => cy.getElementById(execNodeId(execId));
         let activeInspectorTab = 'metadata';
         let inspectorHasData = false;
 
@@ -561,7 +567,7 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
             const link = event.target.closest('[data-node-id], [data-execution-id], [data-load-execution]');
             if (!link) return;
             if (link.dataset.nodeId) highlightAndCenterNode(cy.getElementById(link.dataset.nodeId));
-            else if (link.dataset.executionId) highlightAndCenterNode(executionEdges(link.dataset.executionId).first());
+            else if (link.dataset.executionId) highlightAndCenterNode(executionNode(link.dataset.executionId));
             else expandExecution(link.dataset.loadExecution);
         });
 
@@ -569,13 +575,13 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
         function idLink(id, kind = 'node') {
             if (!id) return NONE_HTML;
             const text = `<span class="mono">${escapeHtml(id)}</span>`;
-            const inGraph = kind === 'execution' ? executionEdges(id).length > 0 : cy.getElementById(id).length > 0;
+            const inGraph = kind === 'execution' ? executionNode(id).length > 0 : cy.getElementById(id).length > 0;
             return inGraph ? `<button type="button" class="meta-link" data-${kind}-id="${escapeHtml(id)}">${text}</button>` : text;
         }
 
         const metaTable = (rows) => `<table class="meta-table"><tbody>${rows.map(([label, html]) => `<tr><th>${escapeHtml(label)}</th><td>${html}</td></tr>`).join('')}</tbody></table>`;
         const statusBadge = (status) => `<span class="status-badge status-${escapeHtml(status)}">${escapeHtml(status || 'Unknown')}</span>`;
-        const loadExecutionButton = (edgeId) => `<button type="button" class="btn-copy" data-load-execution="${escapeHtml(edgeId)}">⬇ Load execution details</button>`;
+        const loadExecutionButton = (nodeId) => `<button type="button" class="btn-copy" data-load-execution="${escapeHtml(nodeId)}">⬇ Load execution details</button>`;
 
         // Server dates are ISO strings with microseconds, e.g. "2026-09-24T14:22:12.594780"
         const formatDate = (value) => value ? escapeHtml(String(value).replace('T', ' ').replace(/\.\d+/, '')) : NONE_HTML;
@@ -598,7 +604,7 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
             const meta = ele.data('fullData')?.meta || {};
             let executionHtml = idLink(meta.execution, 'execution');
             if (meta.execution) {
-                const execEdge = executionEdges(meta.execution).first();
+                const execEdge = executionNode(meta.execution);
                 if (execEdge.data('isLoaded')) {
                     const execution = execEdge.data('fullData');
                     executionHtml += `<div class="meta-sub">⚙ ${escapeHtml(execution.WorkflowID)} <span class="muted">v${escapeHtml(execution.WorkflowVersion)}</span> ${statusBadge(execution.Status)}</div>`;
@@ -730,10 +736,10 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
                         { selector: 'edge', style: { 'width': 3, 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'label': 'data(label)', 'font-size': 10, 'text-background-opacity': 0.9, 'text-background-color': '#fff', 'text-margin-y': -10, 'transition-property': 'line-color, width, line-style', 'transition-duration': '0.2s' } },
                         
                         { selector: 'edge.process-edge', style: { 'line-color': '#e65100', 'target-arrow-color': '#e65100', 'color': '#e65100' } },
-                        { selector: 'edge.stub-edge', style: { 'line-style': 'dashed' } },
-                        { selector: 'edge.loaded-edge', style: { 'line-style': 'solid', 'width': 4 } },
-                        { selector: 'edge.execution-edge', style: { 'text-wrap': 'wrap', 'font-weight': 'bold', 'loop-direction': '-45deg', 'loop-sweep': '-60deg', 'control-point-step-size': 70 } },
-                        { selector: 'edge.execution-edge.loaded-edge', style: { 'line-color': '#bf360c', 'target-arrow-color': '#bf360c', 'width': 5 } },
+                        { selector: 'node.execution', style: { 'shape': 'hexagon', 'width': 150, 'height': 60, 'text-wrap': 'wrap' } },
+                        { selector: 'node.execution.stub', style: { 'background-color': '#fff', 'border-color': '#e65100', 'border-style': 'dashed', 'color': '#e65100' } },
+                        { selector: 'node.execution.loaded', style: { 'background-color': '#e65100', 'color': '#fff' } },
+                        { selector: 'node.execution:selected', style: { 'border-width': 5, 'border-color': '#ffca28', 'background-color': '#bf360c', 'color': '#fff' } },
                         
                         { selector: 'edge.parent-edge', style: { 'line-color': '#ba68c8', 'target-arrow-color': '#ba68c8', 'line-style': 'dashed', 'color': '#ba68c8' } },
                         { selector: 'edge.containment-edge', style: { 'line-color': '#64b5f6', 'target-arrow-shape': 'none', 'source-arrow-shape': 'diamond', 'source-arrow-color': '#64b5f6', 'color': '#1565c0' } },
@@ -752,11 +758,11 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
                     const ele = evt.target;
                     let menuHtml = '';
                     
-                    if (ele.isNode() || ele.data('execId')) {
+                    if (ele.isNode()) {
                         if (!ele.data('isLoaded')) {
-                            const expandFn = ele.isNode() ? 'expandEntity' : 'expandExecution';
+                            const expandFn = ele.data('execId') ? 'expandExecution' : 'expandEntity';
                             menuHtml += `<div class="context-menu-item" onclick="${expandFn}('${ele.id()}'); document.getElementById('context-menu').style.display='none'">➕ Fetch & Expand</div>`;
-                        } else if (ele.isNode()) {
+                        } else if (!ele.data('execId')) {
                             menuHtml += `<div class="context-menu-item" onclick="collapseNode('${ele.id()}'); document.getElementById('context-menu').style.display='none'">➖ Collapse Data</div>`;
                         }
                         menuHtml += `<div class="context-menu-separator"></div>`;

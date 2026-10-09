@@ -289,17 +289,25 @@
 
             walkEntities(schema, data, processNode);
 
-            // Executions: upstream -> entity, plus EDMMapping inputs -> outputs. Without upstream or inputs the execution
-            // updated the entity in place and is drawn as a loop on it.
+            // Executions are nodes of their own: inputs -> execution -> outputs (edge label = EDMMapping name).
+            // An entity that is both input and output (updated in place) gets only the outgoing edge.
             const drawnExecutionEdges = new Set();
-            function addExecutionEdge(source, target, execId) {
+            function addExecutionEdge(source, target, name) {
                 const key = `${source}->${target}`;
-                if (drawnExecutionEdges.has(key)) return;
+                if (drawnExecutionEdges.has(key) || drawnExecutionEdges.has(`${target}->${source}`)) return;
                 drawnExecutionEdges.add(key);
+                edgeDefs.push(`  ${dotQuote(source)} -> ${dotQuote(target)} [${name ? `label=${dotQuote(` ${name}`)}, ` : ''}color="#bf360c", fontcolor="#bf360c", penwidth=2];`);
+            }
+            const executionNodeId = (execId) => `exec_${execId}`;
+            const executionNodes = new Set();
+            function addExecutionNode(execId) {
+                if (executionNodes.has(execId)) return;
+                executionNodes.add(execId);
                 const execution = executions[execId];
-                const label = [execution ? ` ⚙ ${execution.WorkflowID}` : ' ⚙ execution', ` ${shortId(execId)}`];
+                const title = execution ? `⚙ ${execution.WorkflowID}` : '⚙ execution';
+                const subtitle = execution ? `v${execution.WorkflowVersion}, ${execution.Status}` : '';
                 const tooltip = execution ? [`Execution ${execId}`, `${execution.WorkflowID} v${execution.WorkflowVersion}, ${execution.Status}`] : [`Execution ${execId}`];
-                edgeDefs.push(`  ${dotQuote(source)} -> ${dotQuote(target)} [label=${dotQuote(...label)}, tooltip=${dotQuote(...tooltip)}, color="#bf360c", fontcolor="#bf360c", penwidth=2${execution ? '' : ', style="dashed"'}];`);
+                nodeDefs[executionNodeId(execId)] = `  ${dotQuote(executionNodeId(execId))} [label=${htmlNodeLabel(title, execId, subtitle)}, tooltip=${dotQuote(...tooltip)}, shape=hexagon, style="filled${execution ? '' : ',dashed'}", fillcolor="#fff3e0", color="#bf360c", fontcolor="#bf360c"];`;
             }
             for (const { execId, upstreamId, id } of executionLinks) {
                 const execution = executions[execId];
@@ -307,11 +315,13 @@
                 [...inputs, ...outputs].forEach(({ id: mappedId, mapping }) => {
                     if (!nodeDefs[mappedId]) nodeDefs[mappedId] = stubNode(mappedId, mapping.EDMEntity);
                 });
-                const sources = inputs.map(input => input.id).filter(inputId => inputId !== id);
-                if (upstreamId) addExecutionEdge(upstreamId, id, execId);
-                else if (sources.length === 0) addExecutionEdge(id, id, execId);
-                const targets = new Set([id, ...outputs.map(output => output.id)]);
-                targets.forEach(target => sources.forEach(source => { if (source !== target) addExecutionEdge(source, target, execId); }));
+                addExecutionNode(execId);
+                const execNode = executionNodeId(execId);
+                const targets = new Map([[id, '']]);
+                outputs.forEach(output => targets.set(output.id, output.mapping.Name));
+                if (upstreamId) addExecutionEdge(upstreamId, execNode, '');
+                inputs.forEach(input => { if (!targets.has(input.id)) addExecutionEdge(input.id, execNode, input.mapping.Name); });
+                targets.forEach((name, target) => addExecutionEdge(execNode, target, name));
             }
 
             return 'digraph G {\n' +

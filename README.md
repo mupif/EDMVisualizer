@@ -97,8 +97,8 @@ After sign-in, the configured initial entity is loaded and laid out left to righ
 | Light-blue edge with diamond | Composition: the entity contains the linked entity (`contains: <attribute>`) |
 | Purple dashed edge `belongs to` | Link to the parent entity |
 | Orange edge `derived from` | Upstream entity with no recorded execution |
-| Orange dashed edge `Exec: 6ab4ed…` | Execution that produced the entity; details not loaded yet |
-| Dark-orange solid edge `⚙ Workflow vN / Status` | Execution with loaded details |
+| White hexagon, orange dashed outline `⚙ Execution` | Execution that produced the entity; details not loaded yet |
+| Orange hexagon `⚙ Workflow vN / Status` | Execution with loaded details; orange edges link its inputs and outputs |
 
 **Inspector**
 
@@ -124,7 +124,7 @@ After you sign in, the page fetches the entity up to the configured depth and th
   - composition, labelled with the attribute name and drawn with a diamond on the container;
   - `belongs to`, for a parent outside the fetched tree;
   - `derived from`, for an upstream entity without an execution;
-  - executions, labelled `⚙ <workflow>` and the shortened execution ID. Hover over an execution edge to see its full ID, workflow version and status.
+  - executions, as hexagon nodes labelled `⚙ <workflow>`, version, status and the shortened execution ID, linked from their inputs and to their outputs. Hover over an execution node to see its full ID.
 
 If the page was given a `link`, clicking the graph opens it.
 
@@ -171,15 +171,15 @@ Build such URLs with `URLSearchParams`, which takes care of the encoding:
 
 ## How executions are drawn
 
-An entity whose `meta` contains `execution` was produced by a MuPIF workflow execution. Both tools fetch the execution from `GET /api/executions/{id}` and draw it as an edge:
+An entity whose `meta` contains `execution` was produced by a MuPIF workflow execution. Both tools fetch the execution from `GET /api/executions/{id}` and draw it as a single hexagonal **execution node** (shared by all entities with the same execution), so N inputs and M outputs need N+M edges instead of N×M:
 
-- **Upstream to entity** when the entity has `meta.upstream`.
-- **A loop on the entity** when there is no upstream and no other input, meaning the execution updated the entity in place.
-- **Input to output** for the entities listed in the execution's `EDMMapping`:
+- **Upstream entity → execution → entity** when the entity has `meta.upstream`. Without upstream, the execution node points to the entity.
+- **Inputs → execution → outputs** for the entities listed in the execution's `EDMMapping` (edge labels are the mapping names):
   - A mapping is an **output** when an `OutputsData` item writes to it (the first segment of its `EDMPath`, e.g. `C` in `C.q1`, equals the mapping `Name`), or when `createNew` contains an ID.
   - All other mappings are **inputs**.
+  - An entity that is both input and output (updated in place) is drawn only as an output: **execution → entity**.
 
-Mapped entities that are not yet in the graph are added as unloaded nodes. In the static visualizer, an execution that cannot be fetched is drawn as a dashed `⚙ execution` edge, and the rest of the graph is still rendered.
+Mapped entities that are not yet in the graph are added as unloaded nodes. In the static visualizer, an execution that cannot be fetched is drawn as a dashed `⚙ execution` node, and the rest of the graph is still rendered.
 
 ## API endpoints used
 
@@ -200,7 +200,7 @@ All requests except login send `Authorization: Bearer <token>`.
 | `Login failed: Incorrect username or password` | Use your MuPIF DB e-mail address as the username. |
 | `Network Error!` or `Failed to fetch` | API reachable from your network? CDN scripts blocked by an extension or proxy? Check the browser console. |
 | `HTTP error! status: 404` on Fetch & Expand | The entity type or ID does not exist in that database, e.g. a stale reference. |
-| Execution edge stays `Exec: …` | The execution could not be loaded (deleted, or not accessible to your account). The browser console has details. |
+| Execution node stays `⚙ Execution` | The execution could not be loaded (deleted, or not accessible to your account). The browser console has details. |
 | **Copy** button reports "Clipboard access denied" | Serve the page from `http://localhost` or HTTPS instead of `file://`. |
 
 ## Repository layout
