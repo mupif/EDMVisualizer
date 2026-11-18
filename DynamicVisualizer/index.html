@@ -61,6 +61,8 @@
         .btn-copy { padding: 4px 8px; font-size: 0.75rem; border: 1px solid #ccc; background: #fff; border-radius: 4px; cursor: pointer; color: #555; transition: all 0.2s; font-weight: bold; }
         .btn-copy:hover { background: #e3f2fd; border-color: #1565c0; color: #1565c0; }
         .btn-copy.success { background: #e8f5e9; border-color: #4caf50; color: #2e7d32; }
+        .btn-copy:disabled { opacity: 0.4; cursor: default; }
+        .pager { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 0.85rem; }
 
         /* Context Menu */
         #context-menu { position: absolute; display: none; background: white; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 100; min-width: 150px; overflow: hidden; }
@@ -590,6 +592,8 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
                         { group: 'nodes', data: { id: groupId, label: `⚙ ${pagination.totalCount} executions\nuse this entity`, entityId: nodeId, entityType: type, dbName: dbName, totalCount: pagination.totalCount, isLoaded: true, fullData: { meta: { type: 'Executions using entity' } } }, classes: 'execution-group' },
                         { group: 'edges', data: { id: `e_${nodeId}_${groupId}`, source: nodeId, target: groupId, label: '', fullData: null, isLoaded: true }, classes: 'process-edge consumer-edge' }
                     ]);
+                    const group = cy.getElementById(groupId);
+                    group.data({ totalCount: pagination.totalCount, label: consumerGroupLabel(group) });
                 }
 
                 runLayout();
@@ -639,11 +643,14 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
         });
 
         document.getElementById('metadata-panel').addEventListener('click', (event) => {
-            const link = event.target.closest('[data-node-id], [data-execution-id], [data-load-execution], [data-find-consumers]');
+            const link = event.target.closest('[data-node-id], [data-execution-id], [data-load-execution], [data-find-consumers], [data-consumer-page], [data-add-consumers]');
             if (!link) return;
+            const group = cy.getElementById(consumerListGroupId);
             if (link.dataset.nodeId) highlightAndCenterNode(cy.getElementById(link.dataset.nodeId));
             else if (link.dataset.executionId) highlightAndCenterNode(executionNode(link.dataset.executionId));
             else if (link.dataset.findConsumers) findConsumers(link.dataset.findConsumers);
+            else if (link.dataset.consumerPage) renderConsumerList(group, Number(link.dataset.consumerPage));
+            else if (link.dataset.addConsumers) addGroupedConsumers(group, link.dataset.addConsumers.split(','));
             else expandExecution(link.dataset.loadExecution);
         });
 
@@ -758,7 +765,68 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
             ]);
         }
 
+        // Executions grouped in one node, listed page by page; only the records of the shown page are fetched.
+        // The token drops a page that arrives after another element was selected.
+        let consumerListGroupId = null;
+        let consumerListToken = 0;
+        const consumerGroupLabel = (group) => {
+            const shown = cy.getElementById(group.data('entityId')).outgoers('node.execution').length;
+            return `⚙ ${group.data('totalCount')} executions\nuse this entity` + (shown ? `\n(${shown} in graph)` : '');
+        };
+
+        async function renderConsumerList(group, page) {
+            const token = ++consumerListToken;
+            const panel = document.getElementById('metadata-panel');
+            const entityId = group.data('entityId');
+            consumerListGroupId = group.id();
+            group.data('consumerPage', page);
+            const summary = () => metaTable([['Entity', idLink(entityId)], ['Executions', escapeHtml(group.data('totalCount'))]]);
+            panel.innerHTML = summary() + '<p class="muted">Loading executions…</p>';
+
+            try {
+                const response = await fetchApi(consumersUrl(group.data('dbName'), group.data('entityType'), entityId, page, CONSUMERS_PAGE_SIZE));
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const { collection, pagination } = await response.json();
+                await Promise.all(collection.map(execId => fetchExecution(execId).catch(error => console.warn(`Execution ${execId}:`, error))));
+                if (token !== consumerListToken) return;
+
+                group.data('totalCount', pagination.totalCount);
+                const pageCount = Math.max(1, Math.ceil(pagination.totalCount / CONSUMERS_PAGE_SIZE));
+                const missing = collection.filter(execId => executionNode(execId).length === 0);
+                const rows = collection.map(execId => {
+                    const execution = executionCache[execId];
+                    const title = escapeHtml(execId);
+                    const idHtml = executionNode(execId).length > 0
+                        ? `<button type="button" class="meta-link mono" title="${title}" data-execution-id="${title}">${escapeHtml(shortId(execId))}</button>`
+                        : `<span class="mono" title="${title}">${escapeHtml(shortId(execId))}</span>`;
+                    const workflow = execution ? `${escapeHtml(execution.WorkflowID)} <span class="muted">v${escapeHtml(execution.WorkflowVersion)}</span>` : '<span class="muted">not available</span>';
+                    const action = missing.includes(execId) ? `<button type="button" class="btn-copy" data-add-consumers="${title}">＋ Add</button>` : '<span class="muted">in graph</span>';
+                    return `<tr><td>${idHtml}</td><td>${workflow}</td><td>${execution ? statusBadge(execution.Status) : NONE_HTML}</td><td>${execution ? formatDate(execution.CreatedDate) : NONE_HTML}</td><td>${action}</td></tr>`;
+                }).join('');
+                const pager = `<div class="pager">
+                        <button type="button" class="btn-copy" data-consumer-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>‹ Prev</button>
+                        <span>Page ${page} / ${pageCount}</span>
+                        <button type="button" class="btn-copy" data-consumer-page="${page + 1}" ${page >= pageCount ? 'disabled' : ''}>Next ›</button>
+                        ${missing.length ? `<button type="button" class="btn-copy" data-add-consumers="${escapeHtml(missing.join(','))}">＋ Add this page</button>` : ''}
+                    </div>`;
+                panel.innerHTML = summary() + pager +
+                    `<table class="io-table"><thead><tr><th>Execution</th><th>Workflow</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+            } catch (error) {
+                if (token !== consumerListToken) return;
+                console.error("Fetch failed:", error);
+                panel.innerHTML = summary() + `<p class="muted">Failed to load the executions: ${escapeHtml(error.message)}</p>`;
+            }
+        }
+
+        function addGroupedConsumers(group, execIds) {
+            addConsumers(group.data('entityId'), execIds);
+            group.data('label', consumerGroupLabel(group));
+            runLayout();
+            renderConsumerList(group, group.data('consumerPage') || 1);
+        }
+
         function renderSidebarData(ele) {
+            consumerListToken++;
             const data = ele.data('fullData');
             const isNode = ele.isNode();
 
@@ -782,18 +850,20 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
 
             // Metadata tab
             const metadataPanel = document.getElementById('metadata-panel');
-            if (ele.data('execId')) metadataPanel.innerHTML = renderExecutionMetadata(ele);
+            const isGroup = ele.hasClass('execution-group');
+            if (isGroup) renderConsumerList(ele, ele.data('consumerPage') || 1);
+            else if (ele.data('execId')) metadataPanel.innerHTML = renderExecutionMetadata(ele);
             else if (isNode) metadataPanel.innerHTML = renderEntityMetadata(ele);
             else metadataPanel.innerHTML = renderLinkMetadata(ele);
 
             // Data tab
-            inspectorHasData = Boolean(data) && Boolean(ele.data('isLoaded'));
+            inspectorHasData = !isGroup && Boolean(data) && Boolean(ele.data('isLoaded'));
             if (inspectorHasData) {
                 jsonEditor.set(data);
                 jsonEditor.expand({ path: function (path) { return path.length <= 2; } });
             } else {
-                document.getElementById('data-empty').textContent = data
-                    ? 'Data unloaded. Right-click in the graph to fetch and expand.'
+                document.getElementById('data-empty').textContent = isGroup ? 'The executions are listed on the Metadata tab.'
+                    : data ? 'Data unloaded. Right-click in the graph to fetch and expand.'
                     : 'No detailed properties for this link.';
             }
             showInspectorTab(activeInspectorTab);
