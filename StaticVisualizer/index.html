@@ -44,6 +44,7 @@
         //   depth        - traversal depth, i.e. max_level of the EDM query (-1 = full depth)
         //   link         - optional URL opened when the graph is clicked; {db}, {type}, {id} and {depth} are replaced
         //   target       - window to open the link in (default _blank = new tab or window; e.g. _self, _top, or a window name)
+        //   consumers    - how many executions using the entity as input to draw (default 5; 0 = none); the rest is counted
         // (the API URL is deliberately not a parameter: a link could otherwise send the user's password to another server)
         const API_ROOT_URL = "https://test.mupif.org/api/";
         const DEFAULT_ENTITY = { db: "dms_sysbet01", type: "Calibration", id: "6ab514418294832e099ab9d8", depth: "2" };
@@ -51,6 +52,8 @@
         const entity = Object.fromEntries(Object.entries(DEFAULT_ENTITY).map(([name, value]) => [name, urlParams.get(name) || value]));
         const graphLink = urlParams.get('link');
         const graphLinkTarget = urlParams.get('target') || '_blank';
+        const consumersParam = Number.parseInt(urlParams.get('consumers'), 10);
+        const consumerLimit = Number.isNaN(consumersParam) ? 5 : Math.max(0, consumersParam);
         const edmUrl = (dbName) => `${API_ROOT_URL}EDM/${encodeURIComponent(dbName)}`;
 
         const shortId = (id) => id ? id.substring(0, 6) + "…" : "unknown";
@@ -213,6 +216,18 @@
             return Object.fromEntries(entries);
         }
 
+        // The first `limit` executions using the entity as input and their total count; none when the lookup fails
+        async function fetchConsumers(db, type, id, limit) {
+            if (limit <= 0) return { ids: [], totalCount: 0 };
+            try {
+                const body = await fetchJson(`${edmUrl(db)}/${encodeURIComponent(type)}/${encodeURIComponent(id)}/executions_using_entity?page=1&pageSize=${limit}`, 'Executions using the entity');
+                return { ids: body.collection, totalCount: body.pagination.totalCount };
+            } catch (error) {
+                console.warn('Executions using the entity:', error);
+                return { ids: [], totalCount: 0 };
+            }
+        }
+
         // Inputs and outputs of an execution from its EDMMapping (same rules as the interactive browser):
         // a mapping is an output when OutputsData writes to it (EDMPath "Name.attr") or createNew holds ids, otherwise an input.
         function executionEndpoints(execution) {
@@ -234,7 +249,7 @@
 
         // --- DOT GENERATOR ---
         // Context only: each entity shows its type and label; edges show composition, parent, upstream and executions.
-        function generateContextDot(schema, data, executions) {
+        function generateContextDot(schema, data, executions, consumers = { ids: [], totalCount: 0 }) {
             const nodeDefs = {};
             const edgeDefs = [];
             const containment = new Set(); // "container->child", so the child's parent link is not drawn twice
@@ -309,7 +324,8 @@
                 const tooltip = execution ? [`Execution ${execId}`, `${execution.WorkflowID} v${execution.WorkflowVersion}, ${execution.Status}`] : [`Execution ${execId}`];
                 nodeDefs[executionNodeId(execId)] = `  ${dotQuote(executionNodeId(execId))} [label=${htmlNodeLabel(title, execId, subtitle)}, tooltip=${dotQuote(...tooltip)}, shape=hexagon, style="filled${execution ? '' : ',dashed'}", fillcolor="#fff3e0", color="#bf360c", fontcolor="#bf360c"];`;
             }
-            for (const { execId, upstreamId, id } of executionLinks) {
+            // Draws the execution with its EDMMapping inputs and outputs, plus the given extra sources and targets
+            function drawExecution(execId, { sources = [], targets: extraTargets = [] } = {}) {
                 const execution = executions[execId];
                 const { inputs, outputs } = execution ? executionEndpoints(execution) : { inputs: [], outputs: [] };
                 [...inputs, ...outputs].forEach(({ id: mappedId, mapping }) => {
@@ -317,11 +333,24 @@
                 });
                 addExecutionNode(execId);
                 const execNode = executionNodeId(execId);
-                const targets = new Map([[id, '']]);
+                const targets = new Map(extraTargets.map(target => [target, '']));
                 outputs.forEach(output => targets.set(output.id, output.mapping.Name));
-                if (upstreamId) addExecutionEdge(upstreamId, execNode, '');
+                sources.forEach(source => addExecutionEdge(source, execNode, ''));
                 inputs.forEach(input => { if (!targets.has(input.id)) addExecutionEdge(input.id, execNode, input.mapping.Name); });
                 targets.forEach((name, target) => addExecutionEdge(execNode, target, name));
+            }
+            for (const { execId, upstreamId, id } of executionLinks) {
+                drawExecution(execId, { sources: upstreamId ? [upstreamId] : [], targets: [id] });
+            }
+
+            // Executions using the root entity as input; the ones not drawn are counted in a note
+            const rootId = data.meta.id;
+            consumers.ids.forEach(execId => drawExecution(execId, { sources: [rootId] }));
+            const notDrawn = consumers.totalCount - consumers.ids.length;
+            if (notDrawn > 0) {
+                const noteId = `more_consumers_${rootId}`;
+                nodeDefs[noteId] = `  ${dotQuote(noteId)} [label=${dotQuote(`+${notDrawn} more execution${notDrawn === 1 ? '' : 's'}`)}, tooltip=${dotQuote(`${consumers.totalCount} executions use ${rootId} as input`)}, shape=hexagon, style="dashed", color="#bf360c", fontcolor="#bf360c"];`;
+                edgeDefs.push(`  ${dotQuote(rootId)} -> ${dotQuote(noteId)} [color="#bf360c", style="dashed"];`);
             }
 
             return 'digraph G {\n' +
@@ -356,17 +385,18 @@
             container.innerHTML = '<span class="status">Loading entity context...</span>';
             try {
                 const query = `?max_level=${encodeURIComponent(depth)}&tracking=false&meta=true`;
-                const [schema, nodeData] = await Promise.all([
+                const [schema, nodeData, consumers] = await Promise.all([
                     fetchJson(`${edmUrl(db)}/schema`, 'Schema'),
-                    fetchJson(`${edmUrl(db)}/${encodeURIComponent(type)}/${encodeURIComponent(id)}${query}`, 'Data')
+                    fetchJson(`${edmUrl(db)}/${encodeURIComponent(type)}/${encodeURIComponent(id)}${query}`, 'Data'),
+                    fetchConsumers(db, type, id, consumerLimit)
                 ]);
 
-                const execIds = new Set();
+                const execIds = new Set(consumers.ids);
                 walkEntities(schema, nodeData, entity => { if (entity.meta.execution) execIds.add(entity.meta.execution); });
                 const executions = await fetchExecutions(execIds);
 
                 const viz = await Viz.instance();
-                const svg = viz.renderSVGElement(generateContextDot(schema, nodeData, executions));
+                const svg = viz.renderSVGElement(generateContextDot(schema, nodeData, executions, consumers));
                 container.innerHTML = '';
                 container.appendChild(svg);
 
