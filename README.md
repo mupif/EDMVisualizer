@@ -1,6 +1,6 @@
 # EDM Interactive Browser
 
-Browser-based tools for exploring entities stored in the **MuPIF DB Entity Data Model (EDM)**. They show how entities are composed, which entities they were derived from, and which workflow executions produced them.
+Browser-based tools for exploring entities stored in the **MuPIF DB Entity Data Model (EDM)**. They show how entities are composed, which entities they were derived from, which workflow executions produced them, and which executions used them as input.
 
 The repository contains two independent single-page tools:
 
@@ -55,6 +55,8 @@ Settings are constants at the top of the `<script>` block of each page.
 | `INITIAL_NODE_TYPE` | `Calibration` | Type of the entity shown after sign-in |
 | `INITIAL_NODE_ID` | `6ab514418294832e099ab9d8` | ID of the entity shown after sign-in |
 | `API_QUERY_PARAMS` | `?max_level=2&tracking=false&meta=true` | Query used when fetching an entity; `max_level` controls how many nested levels are loaded at once |
+| `CONSUMERS_SHOWN_DIRECTLY` | `10` | Up to this many executions using an entity are drawn as nodes; more are grouped into one node |
+| `CONSUMERS_PAGE_SIZE` | `20` | Executions per page in the list of a grouped node |
 
 The database, initial entity and depth can also be set per link with [page parameters](#page-parameters-linking-and-embedding). These constants are the fallbacks.
 
@@ -85,6 +87,7 @@ After sign-in, the configured initial entity is loaded and laid out left to righ
 - **Right-click** a node or edge for actions:
   - **➕ Fetch & Expand**: loads an unloaded entity, or the details of an execution, and adds the related entities to the graph.
   - **➖ Collapse Data**: turns a loaded node back into a stub and removes its edges.
+  - **➡ Find executions using this entity**: adds the executions that took the entity as input (see [Forward: executions using an entity](#forward-executions-using-an-entity)). Not offered for entities of unknown type.
   - **👁️ Inspect in Sidebar**: same as left-click.
 - Scroll to zoom and drag to pan.
 
@@ -99,14 +102,16 @@ After sign-in, the configured initial entity is loaded and laid out left to righ
 | Orange edge `derived from` | Upstream entity with no recorded execution |
 | White hexagon, orange dashed outline `⚙ Execution` | Execution that produced the entity; details not loaded yet |
 | Orange hexagon `⚙ Workflow vN / Status` | Execution with loaded details; orange edges link its inputs and outputs |
+| White hexagon, orange double outline `⚙ N executions use this entity` | Group of executions using the entity as input; select it to list them |
 
 **Inspector**
 
 The header shows the selected element's type and full ID, with a **📋 Copy** button. Below it are two tabs:
 
 - **Metadata**:
-  - *Entity:* type, database, parent, upstream and execution IDs, and whether the data is loaded. IDs that are in the graph are links that select and centre the element. If the execution's details are not loaded yet, a **⬇ Load execution details** button is shown; once they are loaded, the workflow and a status badge appear next to the execution.
+  - *Entity:* type, database, parent, upstream and execution IDs, and whether the data is loaded. IDs that are in the graph are links that select and centre the element. If the execution's details are not loaded yet, a **⬇ Load execution details** button is shown; once they are loaded, the workflow and a status badge appear next to the execution. **Used by** has a **➡ Find executions** button; after the lookup it shows the number of executions using the entity and links to them.
   - *Execution:* workflow and version, status, requester, created/submitted/started/ended times, duration and attempts, plus **Inputs** and **Outputs** tables (Name, EDMPath, Units, Value). Each EDMPath links to the entity it maps to.
+  - *Executions using an entity* (grouped node): the executions page by page, with workflow, status and creation date. **＋ Add** adds one execution to the graph, **＋ Add this page** all on the page; executions already in the graph link to their node.
   - *Other links:* relation type and its From/To entities.
 - **Data**: the complete JSON of the selected element in a searchable tree. String values that match IDs of nodes in the graph are highlighted; clicking one jumps to that node.
 
@@ -116,7 +121,7 @@ The selected tab stays active as you click through the graph.
 
 The static visualizer gives a compact picture of an entity's **context**, not its data. It is meant to be linked to or embedded in other pages. It has no controls of its own: the entity and the traversal depth come from the [page parameters](#page-parameters-linking-and-embedding).
 
-After you sign in, the page fetches the entity up to the configured depth and the executions that produced the fetched entities. It then renders a Graphviz graph:
+After you sign in, the page fetches the entity up to the configured depth, the executions that produced the fetched entities, and the first few executions that use the selected entity as input (`consumers` parameter). It then renders a Graphviz graph:
 
 - **Entities** show only their type, their `label` attribute (if they have one) and a shortened ID (e.g. `6ab514…`). The selected entity is filled dark blue. Hover over an entity to see its full ID.
 - **Entities beyond the traversal depth** (referenced but not fetched) are grey dashed boxes showing their type, if it is known, and their shortened ID.
@@ -125,6 +130,7 @@ After you sign in, the page fetches the entity up to the configured depth and th
   - `belongs to`, for a parent outside the fetched tree;
   - `derived from`, for an upstream entity without an execution;
   - executions, as hexagon nodes labelled `⚙ <workflow>`, version, status and the shortened execution ID, linked from their inputs and to their outputs. Hover over an execution node to see its full ID.
+  - executions using the selected entity beyond the `consumers` limit, counted in one dashed `+N more executions` hexagon.
 
 If the page was given a `link`, clicking the graph opens it.
 
@@ -140,6 +146,7 @@ Other web pages can open either tool, or embed it in an `<iframe>`, and choose w
 | `depth` | ✓ (default `2`) | ✓ (default `2`) | Traversal depth: `max_level` of the EDM query; `-1` = full depth. In the interactive browser it applies to every Fetch & Expand. |
 | `link` |  | ✓ | Optional URL opened when the user clicks the graph. `{db}`, `{type}`, `{id}` and `{depth}` are replaced by the rendered entity's values. Relative URLs are resolved against the static visualizer page. Only `http(s)` URLs are accepted. |
 | `target` |  | ✓ | Where `link` opens: `_blank` (default, new tab or window), `_self`, `_top` (whole page when embedded), or a window name to reuse the same tab |
+| `consumers` |  | ✓ | How many executions using the selected entity as input to draw (default `5`; `0` = none). The others are counted in a `+N more executions` node. |
 
 The API URL is intentionally **not** a parameter. Otherwise, a crafted link could make the sign-in dialog send the user's password to a different server.
 
@@ -181,6 +188,17 @@ An entity whose `meta` contains `execution` was produced by a MuPIF workflow exe
 
 Mapped entities that are not yet in the graph are added as unloaded nodes. In the static visualizer, an execution that cannot be fetched is drawn as a dashed `⚙ execution` node, and the rest of the graph is still rendered.
 
+### Forward: executions using an entity
+
+The steps above trace an entity **backwards**, to the execution that produced it and that execution's inputs. To trace **forwards**, the tools ask `GET /api/EDM/{db}/{type}/{id}/executions_using_entity` for the executions that took the entity as input, and draw **entity → execution**. Once an execution's details are loaded, its outputs follow as described above.
+
+An entity can be the input of hundreds of executions. The endpoint returns only IDs, page by page, so the tools never fetch or draw all of them:
+
+- **Interactive browser:** **➡ Find executions using this entity** draws up to `CONSUMERS_SHOWN_DIRECTLY` (10) executions as stub hexagons labelled with their workflow and status. When there are more, it draws one grouped node instead. Its inspector lists the executions `CONSUMERS_PAGE_SIZE` (20) at a time and fetches only the details of the page shown; you add the ones you want to follow.
+- **Static visualizer:** only for the selected entity, the first `consumers` (5) executions are drawn with their inputs and outputs; the rest are counted in a `+N more executions` node. If the lookup fails, the graph is drawn without them.
+
+The endpoint returns the executions in no particular order and cannot filter them, so the tools cannot pick, for example, only finished executions of one workflow without fetching all of them.
+
 ## API endpoints used
 
 | Method & path | Used for |
@@ -190,6 +208,7 @@ Mapped entities that are not yet in the graph are added as unloaded nodes. In th
 | `GET /api/EDM/{db}/schema` | Entity type schema of a database |
 | `GET /api/EDM/{db}/{type}/{id}?max_level=…&tracking=false&meta=true` | Entity data with metadata |
 | `GET /api/executions/{id}` | Execution details |
+| `GET /api/EDM/{db}/{type}/{id}/executions_using_entity?page=…&pageSize=…` | IDs of the executions using the entity as input, with the total count |
 
 All requests except login send `Authorization: Bearer <token>`.
 
