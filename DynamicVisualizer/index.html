@@ -122,7 +122,12 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
         const EDM_DB_NAME = pageParams.get('db') || "dms_sysbet01";
         const edmUrl = (dbName) => `${API_ROOT_URL}EDM/${encodeURIComponent(dbName || EDM_DB_NAME)}`;
         const API_QUERY_PARAMS = `?max_level=${encodeURIComponent(pageParams.get('depth') || '2')}&tracking=false&meta=true`;
-        const INITIAL_NODE_ID = pageParams.get('id') || "6ab514418294832e099ab9d8";
+        // Executions using an entity as input: up to CONSUMERS_SHOWN_DIRECTLY are drawn as nodes, more are grouped into one
+        // node whose inspector lists them page by page.
+        const CONSUMERS_SHOWN_DIRECTLY = 10;
+        const CONSUMERS_PAGE_SIZE = 20;
+        const consumersUrl = (dbName, type, id, page, pageSize) => `${edmUrl(dbName)}/${encodeURIComponent(type)}/${encodeURIComponent(id)}/executions_using_entity?page=${page}&pageSize=${pageSize}`;
+        const INITIAL_NODE_ID =pageParams.get('id') || "6ab514418294832e099ab9d8";
         const INITIAL_NODE_TYPE = pageParams.get('type') || "Calibration";
         // --- AUTHENTICATION (same flow as getAuthToken() in mupifDB/api/client_mupif.py) ---
         // Credentials are kept in memory only, so an expired token can be renewed by logging in again.
@@ -537,6 +542,66 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
             }
         };
 
+        // --- EXECUTIONS USING AN ENTITY ---
+        const consumerGroupId = (entityId) => `uses_${entityId}`;
+        const canFindConsumers = (ele) => ele.isNode() && !ele.data('execId') && !ele.hasClass('execution-group')
+            && (ele.data('fullData')?.meta?.type || ele.data('type') || 'Unknown') !== 'Unknown';
+
+        // Adds the executions as stub nodes linked from the entity; a cached record gives the stub its workflow and status
+        function addConsumers(entityId, execIds) {
+            const elements = [];
+            execIds.forEach(execId => {
+                const execNode = execNodeId(execId);
+                elements.push(executionNodeElement(execId));
+                // Skip when the execution produced the entity (it was updated in place)
+                if (cy.getElementById(`e_${execNode}_${entityId}`).length === 0) {
+                    elements.push({ group: 'edges', data: { id: `e_${entityId}_${execNode}`, source: entityId, target: execNode, label: '', fullData: null, isLoaded: true }, classes: 'process-edge' });
+                }
+            });
+            mergeIntoGraph(elements);
+            execIds.forEach(execId => {
+                const execution = executionCache[execId];
+                const node = executionNode(execId);
+                if (execution && !node.data('isLoaded')) node.data('label', `⚙ ${execution.WorkflowID} v${execution.WorkflowVersion}\n${execution.Status}`);
+            });
+        }
+
+        // Few executions are drawn as nodes, many are grouped into one node listing them in the inspector
+        window.findConsumers = async function(nodeId) {
+            document.getElementById('loading').style.display = 'block';
+            const entityNode = cy.getElementById(nodeId);
+            const type = entityNode.data('fullData')?.meta?.type || entityNode.data('type');
+            const dbName = entityNode.data('dbName') || EDM_DB_NAME;
+            const fetchUrl = consumersUrl(dbName, type, nodeId, 1, CONSUMERS_SHOWN_DIRECTLY);
+
+            try {
+                console.log(`Fetching executions using the entity from: ${fetchUrl}`);
+                const response = await fetchApi(fetchUrl);
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const { collection, pagination } = await response.json();
+                entityNode.data('consumerCount', pagination.totalCount);
+
+                if (pagination.totalCount <= CONSUMERS_SHOWN_DIRECTLY) {
+                    await Promise.all(collection.map(execId => fetchExecution(execId).catch(error => console.warn(`Execution ${execId}:`, error))));
+                    addConsumers(nodeId, collection);
+                } else {
+                    const groupId = consumerGroupId(nodeId);
+                    mergeIntoGraph([
+                        { group: 'nodes', data: { id: groupId, label: `⚙ ${pagination.totalCount} executions\nuse this entity`, entityId: nodeId, entityType: type, dbName: dbName, totalCount: pagination.totalCount, isLoaded: true, fullData: { meta: { type: 'Executions using entity' } } }, classes: 'execution-group' },
+                        { group: 'edges', data: { id: `e_${nodeId}_${groupId}`, source: nodeId, target: groupId, label: '', fullData: null, isLoaded: true }, classes: 'process-edge consumer-edge' }
+                    ]);
+                }
+
+                runLayout();
+                entityNode.emit('tap');
+            } catch (error) {
+                console.error("Fetch failed:", error);
+                alert(`Failed to load executions using the entity from:\n${fetchUrl}\n\nError: ${error.message}`);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        };
+
         window.collapseNode = function(nodeId) {
             const targetNode = cy.getElementById(nodeId);
             cy.remove(targetNode.connectedEdges());
@@ -547,6 +612,7 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
             targetNode.data('isLoaded', false);
             targetNode.data('label', `[+] Unloaded\n(${shortId(nodeId)})`);
             targetNode.data('fullData', { meta: { id: nodeId, type: type } });
+            targetNode.removeData('consumerCount');
 
             runLayout();
             targetNode.emit('tap'); 
@@ -573,10 +639,11 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
         });
 
         document.getElementById('metadata-panel').addEventListener('click', (event) => {
-            const link = event.target.closest('[data-node-id], [data-execution-id], [data-load-execution]');
+            const link = event.target.closest('[data-node-id], [data-execution-id], [data-load-execution], [data-find-consumers]');
             if (!link) return;
             if (link.dataset.nodeId) highlightAndCenterNode(cy.getElementById(link.dataset.nodeId));
             else if (link.dataset.executionId) highlightAndCenterNode(executionNode(link.dataset.executionId));
+            else if (link.dataset.findConsumers) findConsumers(link.dataset.findConsumers);
             else expandExecution(link.dataset.loadExecution);
         });
 
@@ -621,6 +688,17 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
                     executionHtml += `<div class="meta-sub">${loadExecutionButton(execEdge.id())}</div>`;
                 }
             }
+            // Executions using the entity as input: a button until they are looked up, then links to their nodes
+            const consumerCount = ele.data('consumerCount');
+            let usedByHtml = NONE_HTML;
+            if (consumerCount === undefined) {
+                if (canFindConsumers(ele)) usedByHtml = `<button type="button" class="btn-copy" data-find-consumers="${escapeHtml(ele.id())}">➡ Find executions</button>`;
+            } else {
+                usedByHtml = `${consumerCount} execution${consumerCount === 1 ? '' : 's'}`;
+                const group = cy.getElementById(consumerGroupId(ele.id()));
+                if (group.length > 0) usedByHtml += `<div class="meta-sub"><button type="button" class="meta-link" data-node-id="${escapeHtml(group.id())}">Show list</button></div>`;
+                ele.outgoers('node.execution').forEach(node => { usedByHtml += `<div class="meta-sub">${idLink(node.data('execId'), 'execution')}</div>`; });
+            }
             const known = ['id', 'type', 'parent', 'upstream', 'execution'];
             return metaTable([
                 ['Type', escapeHtml(meta.type || ele.data('type'))],
@@ -628,6 +706,7 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
                 ['Parent', idLink(meta.parent)],
                 ['Upstream', idLink(meta.upstream)],
                 ['Execution', executionHtml],
+                ['Used by', usedByHtml],
                 ...Object.keys(meta).filter(key => !known.includes(key)).map(key => [key, formatValue(meta[key])]),
                 ['Data', ele.data('isLoaded') ? 'Loaded' : '<span class="muted">Not loaded (right-click → Fetch & Expand)</span>']
             ]);
@@ -749,6 +828,9 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
                         { selector: 'node.execution.stub', style: { 'background-color': '#fff', 'border-color': '#e65100', 'border-style': 'dashed', 'color': '#e65100' } },
                         { selector: 'node.execution.loaded', style: { 'background-color': '#e65100', 'color': '#fff' } },
                         { selector: 'node.execution:selected', style: { 'border-width': 5, 'border-color': '#ffca28', 'background-color': '#bf360c', 'color': '#fff' } },
+                        { selector: 'node.execution-group', style: { 'shape': 'hexagon', 'width': 160, 'height': 64, 'background-color': '#fff', 'border-width': 6, 'border-style': 'double', 'border-color': '#e65100', 'color': '#e65100' } },
+                        { selector: 'node.execution-group:selected', style: { 'border-color': '#ffca28', 'background-color': '#fff3e0', 'color': '#bf360c' } },
+                        { selector: 'edge.consumer-edge', style: { 'line-style': 'dashed' } },
                         
                         { selector: 'edge.parent-edge', style: { 'line-color': '#ba68c8', 'target-arrow-color': '#ba68c8', 'line-style': 'dashed', 'color': '#ba68c8' } },
                         { selector: 'edge.containment-edge', style: { 'line-color': '#64b5f6', 'target-arrow-shape': 'none', 'source-arrow-shape': 'diamond', 'source-arrow-color': '#64b5f6', 'color': '#1565c0' } },
@@ -767,12 +849,15 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
                     const ele = evt.target;
                     let menuHtml = '';
                     
-                    if (ele.isNode()) {
+                    if (ele.isNode() && !ele.hasClass('execution-group')) {
                         if (!ele.data('isLoaded')) {
                             const expandFn = ele.data('execId') ? 'expandExecution' : 'expandEntity';
                             menuHtml += `<div class="context-menu-item" onclick="${expandFn}('${ele.id()}'); document.getElementById('context-menu').style.display='none'">➕ Fetch & Expand</div>`;
                         } else if (!ele.data('execId')) {
                             menuHtml += `<div class="context-menu-item" onclick="collapseNode('${ele.id()}'); document.getElementById('context-menu').style.display='none'">➖ Collapse Data</div>`;
+                        }
+                        if (canFindConsumers(ele)) {
+                            menuHtml += `<div class="context-menu-item" onclick="findConsumers('${ele.id()}'); document.getElementById('context-menu').style.display='none'">➡ Find executions using this entity</div>`;
                         }
                         menuHtml += `<div class="context-menu-separator"></div>`;
                     }
