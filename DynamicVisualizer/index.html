@@ -497,17 +497,26 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
             return elements;
         }
 
+        // Execution records by id, shared by the execution nodes and the lists of executions using an entity
+        const executionCache = {};
+        async function fetchExecution(execId) {
+            if (!executionCache[execId]) {
+                const fetchUrl = `${API_ROOT_URL}executions/${encodeURIComponent(execId)}`;
+                console.log(`Fetching execution from: ${fetchUrl}`);
+                const response = await fetchApi(fetchUrl);
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                executionCache[execId] = (await response.json()).entity;
+            }
+            return executionCache[execId];
+        }
+
         window.expandExecution = async function(nodeId) {
             document.getElementById('loading').style.display = 'block';
             const execNode = cy.getElementById(nodeId);
             const execId = execNode.data('execId');
-            const fetchUrl = `${API_ROOT_URL}executions/${execId}`;
 
             try {
-                console.log(`Fetching execution from: ${fetchUrl}`);
-                const response = await fetchApi(fetchUrl);
-                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-                const execution = (await response.json()).entity;
+                const execution = await fetchExecution(execId);
 
                 mergeIntoGraph(parseExecution(execution, execId));
 
@@ -522,7 +531,7 @@ const shortId = (id) => id ? id.substring(0, 6) + "..." : "unknown";
                 execNode.emit('tap');
             } catch (error) {
                 console.error("Fetch failed:", error);
-                alert(`Failed to load execution from:\n${fetchUrl}\n\nError: ${error.message}`);
+                alert(`Failed to load execution ${execId}\n\nError: ${error.message}`);
             } finally {
                 document.getElementById('loading').style.display = 'none';
             }
