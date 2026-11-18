@@ -309,7 +309,8 @@
                 const tooltip = execution ? [`Execution ${execId}`, `${execution.WorkflowID} v${execution.WorkflowVersion}, ${execution.Status}`] : [`Execution ${execId}`];
                 nodeDefs[executionNodeId(execId)] = `  ${dotQuote(executionNodeId(execId))} [label=${htmlNodeLabel(title, execId, subtitle)}, tooltip=${dotQuote(...tooltip)}, shape=hexagon, style="filled${execution ? '' : ',dashed'}", fillcolor="#fff3e0", color="#bf360c", fontcolor="#bf360c"];`;
             }
-            for (const { execId, upstreamId, id } of executionLinks) {
+            // Draws the execution with its EDMMapping inputs and outputs, plus the given extra sources and targets
+            function drawExecution(execId, { sources = [], targets: extraTargets = [] } = {}) {
                 const execution = executions[execId];
                 const { inputs, outputs } = execution ? executionEndpoints(execution) : { inputs: [], outputs: [] };
                 [...inputs, ...outputs].forEach(({ id: mappedId, mapping }) => {
@@ -317,11 +318,14 @@
                 });
                 addExecutionNode(execId);
                 const execNode = executionNodeId(execId);
-                const targets = new Map([[id, '']]);
+                const targets = new Map(extraTargets.map(target => [target, '']));
                 outputs.forEach(output => targets.set(output.id, output.mapping.Name));
-                if (upstreamId) addExecutionEdge(upstreamId, execNode, '');
+                sources.forEach(source => addExecutionEdge(source, execNode, ''));
                 inputs.forEach(input => { if (!targets.has(input.id)) addExecutionEdge(input.id, execNode, input.mapping.Name); });
                 targets.forEach((name, target) => addExecutionEdge(execNode, target, name));
+            }
+            for (const { execId, upstreamId, id } of executionLinks) {
+                drawExecution(execId, { sources: upstreamId ? [upstreamId] : [], targets: [id] });
             }
 
             return 'digraph G {\n' +
